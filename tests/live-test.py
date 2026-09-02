@@ -23,17 +23,23 @@ SCRIBE = os.path.join(PLUGIN_DIR, "scribe")
 
 BACKEND = os.environ.get("SCRIBE_LIVE_BACKEND", "anthropic")
 MODEL = os.environ.get("SCRIBE_LIVE_MODEL", "claude-opus-5")
+ENDPOINT = os.environ.get("SCRIBE_LIVE_ENDPOINT", "")
+EFFORT = os.environ.get("SCRIBE_LIVE_EFFORT", "")
 
 
 @unittest.skipUnless(os.environ.get("SCRIBE_LIVE"), "set SCRIBE_LIVE=1 to spend tokens")
 class LiveCorrection(unittest.TestCase):
     def correct(self, text, profile="Grammar"):
+        argv = [sys.executable, SCRIBE, "run", "--stdin", "--json",
+                "--no-copy", "--no-notify", "--no-history",
+                "--backend", BACKEND, "--model", MODEL,
+                "--profile", profile, "--timeout", "180"]
+        if ENDPOINT:
+            argv += ["--endpoint", ENDPOINT]
+        if EFFORT:
+            argv += ["--effort", EFFORT]
         result = subprocess.run(
-            [sys.executable, SCRIBE, "run", "--stdin", "--json",
-             "--no-copy", "--no-notify", "--no-history",
-             "--backend", BACKEND, "--model", MODEL,
-             "--profile", profile, "--timeout", "180"],
-            input=text, capture_output=True, text=True, timeout=200,
+            argv, input=text, capture_output=True, text=True, timeout=200,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)["corrected"]
