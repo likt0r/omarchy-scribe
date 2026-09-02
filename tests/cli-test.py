@@ -265,6 +265,11 @@ class ScribeTest(unittest.TestCase):
         sent = json.loads(json.loads(result.stdout)["corrected"])
         self.assertEqual(sent["options"], {"baseUrl": "http://gpu-box.local:11434/v1"})
 
+    def test_effort_reaches_the_backend_as_an_option(self):
+        result = self.correct("x", "--backend", "reflect", "--effort", "none")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertEqual(sent["options"], {"effort": "none"})
+
     def test_no_endpoint_means_no_option(self):
         result = self.correct("x", "--backend", "reflect")
         sent = json.loads(json.loads(result.stdout)["corrected"])

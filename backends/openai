@@ -159,6 +159,15 @@ def main():
         "stream": False,
     }
 
+    # Only sent when asked for. A reasoning model told "none" skips its
+    # deliberation entirely -- measured against qwen3.5:27b on ollama, that is
+    # 1.4s instead of 8.8s per correction with identical results, because
+    # proofreading has nothing to deliberate about. But a non-reasoning model
+    # may reject the field outright, so it is never sent unbidden.
+    effort = (payload.get("options") or {}).get("effort")
+    if effort:
+        body["reasoning_effort"] = effort
+
     headers = {"content-type": "application/json"}
     if key:
         headers["authorization"] = "Bearer %s" % key

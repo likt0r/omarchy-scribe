@@ -29,6 +29,7 @@ Panel {
   readonly property string backend: setting("backend", "anthropic")
   readonly property string model: setting("model", "claude-opus-5")
   readonly property string endpoint: setting("endpoint", "")
+  readonly property string effort: setting("effort", "")
   readonly property string profile: setting("profile", "Grammar")
   readonly property int timeoutSec: setting("timeoutSec", 30)
   readonly property bool clipboardFallback: setting("clipboardFallback", true)
@@ -93,6 +94,7 @@ Panel {
       "--history-limit", String(historyLimit)
     ]
     if (endpoint !== "") argv = argv.concat(["--endpoint", endpoint])
+    if (effort !== "") argv = argv.concat(["--effort", effort])
     if (!clipboardFallback) argv.push("--no-clipboard-fallback")
     if (!notifyOnDone) argv.push("--no-notify")
     if (!historyEnabled) argv.push("--no-history")
@@ -555,6 +557,35 @@ Panel {
               Text {
                 width: parent.width
                 text: "Passed to the backend verbatim. claude-haiku-4-5 is the cheaper, faster choice."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.spacing.labelGap
+
+              PanelSectionHeader {
+                text: "EFFORT"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              TextField {
+                width: parent.width
+                text: root.effort
+                foreground: root.foreground
+                onEditingFinished: if (text !== root.effort) root.updateSetting("effort", text)
+              }
+
+              Text {
+                width: parent.width
+                text: "Empty lets the backend decide. On a thinking model served by ollama, "
+                      + "\"none\" turns the deliberation off — about six times faster at the "
+                      + "same quality, because proofreading has nothing to deliberate about."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

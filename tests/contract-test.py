@@ -311,6 +311,21 @@ class OpenAiAdapter(unittest.TestCase):
                          "http://gpu-box.local:11434/v1/chat/completions")
         self.assertEqual(result["text"], "the cat")
 
+    def test_effort_is_sent_as_reasoning_effort(self):
+        """Measured on qwen3.5:27b via ollama: "none" is 1.4s against 8.8s
+        with deliberation, and scores identically on German error cases --
+        proofreading has nothing to deliberate about."""
+        self.run_main(options={"effort": "none"})
+        self.assertEqual(self.captured["body"]["reasoning_effort"], "none")
+
+    def test_effort_is_omitted_when_unset(self):
+        """A non-reasoning model may reject the field, so it is never sent
+        unbidden."""
+        self.run_main()
+        self.assertNotIn("reasoning_effort", self.captured["body"])
+        self.run_main(options={"effort": ""})
+        self.assertNotIn("reasoning_effort", self.captured["body"])
+
     def test_a_leading_think_block_is_stripped(self):
         """qwen3 and deepseek-r1 narrate into the content; the clipboard must
         get the correction, not the narration."""

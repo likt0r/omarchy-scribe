@@ -170,12 +170,23 @@ A remote ollama over plain HTTP sends your selection across the network
 unencrypted. On your own LAN that is usually fine; over anything else, put it
 behind a tunnel.
 
-**Reasoning models.** qwen3, deepseek-r1 and friends narrate before answering,
-and the OpenAI-compatible shape has nowhere to put that, so it arrives inside
-the reply. Scribe strips a complete leading `<think>…</think>` block. A
-non-reasoning model of the same size (gemma3, mistral) is still the better
-choice here — proofreading does not need deliberation, and you feel every
-token of it.
+**Reasoning models: set Effort to `none`.** Proofreading has nothing to
+deliberate about, and deliberation is most of the wall clock. Measured on
+qwen3.5:27b served by ollama on a TITAN RTX, over four German error cases
+(das/dass, comma placement, case after prepositions, nominalised verbs, plus
+one already-correct sentence that must come back untouched):
+
+| | `none` | default |
+|---|---|---|
+| per correction | **1.4 s** | 8.8 s |
+| errors caught | identical | identical |
+
+Six times the latency for the same answers. The Effort field is sent as
+`reasoning_effort`, and only when you set it — a non-reasoning model may
+reject the field outright.
+
+Scribe also strips a complete leading `<think>…</think>` block, since a model
+that reasons anyway has nowhere else to put it in the OpenAI-compatible shape.
 
 Writing your own takes about five lines — read one JSON object on stdin, write
 one on stdout. Drop it in `~/.config/omarchy/scribe/backends/` and it shadows

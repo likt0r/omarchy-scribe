@@ -452,6 +452,8 @@ def cmd_run(args):
     # next login, which is a poor answer to "point it at my other machine".
     if args.endpoint:
         options["baseUrl"] = args.endpoint
+    if args.effort:
+        options["effort"] = args.effort
     payload = {
         "system": profile["system"],
         "text": original,
@@ -636,6 +638,11 @@ def build_parser():
         "--endpoint",
         default="",
         help="OpenAI-compatible base URL for backends that take one (ollama, llama.cpp, ...)",
+    )
+    run.add_argument(
+        "--effort",
+        default="",
+        help="how hard the model should deliberate; 'none' disables a thinking model's reasoning",
     )
     run.add_argument("--profile", default=DEFAULT_PROFILE)
     run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
