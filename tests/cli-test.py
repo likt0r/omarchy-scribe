@@ -333,9 +333,46 @@ class ScribeTest(unittest.TestCase):
         self.assertNotIn("README.md", names)  # not executable
 
     def test_doctor_reports_a_working_backend(self):
+        """The backend's own --check has to be run and reported.
+
+        The overall exit code is deliberately not asserted here: a CI runner
+        has no wl-clipboard, so doctor is right to exit 2 there. That the
+        selected backend resolved and answered is what this covers.
+        """
+        result = self.run_scribe("doctor", "--backend", "echo")
+        self.assertIn("echo needs nothing", result.stdout)
+        self.assertIn("selected     echo", result.stdout)
+
+    @unittest.skipUnless(
+        shutil.which("wl-paste") and shutil.which("wl-copy"),
+        "needs wl-clipboard; a headless runner has none",
+    )
+    def test_doctor_passes_on_a_configured_machine(self):
         result = self.run_scribe("doctor", "--backend", "echo")
         self.assertEqual(result.returncode, EXIT_OK, result.stdout)
-        self.assertIn("echo needs nothing", result.stdout)
+
+    def test_doctor_reports_missing_clipboard_tools(self):
+        """wl-paste and wl-copy are not optional; their absence is a problem."""
+        # A PATH holding only what a stub backend's shebang needs, so
+        # wl-paste and wl-copy are genuinely absent while the adapters still
+        # start.
+        minimal = tempfile.mkdtemp(prefix="scribe-minbin-")
+        for tool in ("env", "python3"):
+            found = shutil.which(tool)
+            if found:
+                os.symlink(found, os.path.join(minimal, tool))
+        env = dict(self.env)
+        env["PATH"] = minimal
+        try:
+            result = subprocess.run(
+                [sys.executable, SCRIBE, "doctor", "--backend", "echo"],
+                capture_output=True, text=True, env=env, timeout=60,
+            )
+        finally:
+            shutil.rmtree(minimal, ignore_errors=True)
+        self.assertEqual(result.returncode, EXIT_CONFIG, result.stdout)
+        self.assertIn("MISSING", result.stdout)
+        self.assertIn("wl-paste", result.stdout)
 
     def test_doctor_fails_on_a_missing_backend(self):
         result = self.run_scribe("doctor", "--backend", "nosuch")
