@@ -28,6 +28,7 @@ Panel {
 
   readonly property string backend: setting("backend", "anthropic")
   readonly property string model: setting("model", "claude-opus-5")
+  readonly property string endpoint: setting("endpoint", "")
   readonly property string profile: setting("profile", "Grammar")
   readonly property int timeoutSec: setting("timeoutSec", 30)
   readonly property bool clipboardFallback: setting("clipboardFallback", true)
@@ -91,6 +92,7 @@ Panel {
       "--timeout", String(timeoutSec),
       "--history-limit", String(historyLimit)
     ]
+    if (endpoint !== "") argv = argv.concat(["--endpoint", endpoint])
     if (!clipboardFallback) argv.push("--no-clipboard-fallback")
     if (!notifyOnDone) argv.push("--no-notify")
     if (!historyEnabled) argv.push("--no-history")
@@ -250,7 +252,9 @@ Panel {
   Process {
     id: doctorProc
     running: false
-    command: [root.pluginDir + "/scribe", "doctor", "--backend", root.backend]
+    command: root.endpoint === ""
+      ? [root.pluginDir + "/scribe", "doctor", "--backend", root.backend]
+      : [root.pluginDir + "/scribe", "doctor", "--backend", root.backend, "--endpoint", root.endpoint]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.doctorReport = text }
     stderr: StdioCollector { waitForEnd: true }
   }
@@ -544,6 +548,36 @@ Panel {
               Text {
                 width: parent.width
                 text: "Passed to the backend verbatim. claude-haiku-4-5 is the cheaper, faster choice."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            // Only the openai backend takes one, so the field stays out of
+            // the way until that backend is the one selected.
+            Column {
+              visible: root.backend === "openai"
+              width: parent.width
+              spacing: Style.spacing.labelGap
+
+              PanelSectionHeader {
+                text: "ENDPOINT"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              TextField {
+                width: parent.width
+                text: root.endpoint
+                foreground: root.foreground
+                onEditingFinished: if (text !== root.endpoint) root.updateSetting("endpoint", text)
+              }
+
+              Text {
+                width: parent.width
+                text: "OpenAI-compatible base URL, e.g. http://gpu-box.local:11434/v1 for a remote ollama. Empty means api.openai.com."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

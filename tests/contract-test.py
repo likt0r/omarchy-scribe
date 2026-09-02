@@ -285,15 +285,61 @@ class OpenAiAdapter(unittest.TestCase):
         finally:
             del os.environ["SCRIBE_OPENAI_BASE_URL"]
 
+    def test_the_option_beats_the_environment(self):
+        """The panel setting is the authority; the env var is the fallback."""
+        os.environ["SCRIBE_OPENAI_BASE_URL"] = "http://from-env:1234/v1"
+        try:
+            self.assertEqual(
+                self.mod.base_url({"baseUrl": "http://from-setting:11434/v1/"}),
+                "http://from-setting:11434/v1")
+            self.assertEqual(self.mod.base_url({}), "http://from-env:1234/v1")
+            self.assertEqual(self.mod.base_url({"baseUrl": "  "}), "http://from-env:1234/v1")
+        finally:
+            del os.environ["SCRIBE_OPENAI_BASE_URL"]
+
+    def test_only_openai_itself_demands_a_key_up_front(self):
+        """A remote ollama has no auth; demanding a key would make the
+        common case impossible."""
+        self.assertTrue(self.mod.needs_key("https://api.openai.com/v1"))
+        self.assertFalse(self.mod.needs_key("http://gpu-box.local:11434/v1"))
+        self.assertFalse(self.mod.needs_key("http://192.168.1.20:11434/v1"))
+        self.assertFalse(self.mod.needs_key("http://localhost:11434/v1"))
+
+    def test_a_remote_endpoint_is_used_for_the_request(self):
+        result = self.run_main(options={"baseUrl": "http://gpu-box.local:11434/v1"})
+        self.assertEqual(self.captured["url"],
+                         "http://gpu-box.local:11434/v1/chat/completions")
+        self.assertEqual(result["text"], "the cat")
+
+    def test_a_leading_think_block_is_stripped(self):
+        """qwen3 and deepseek-r1 narrate into the content; the clipboard must
+        get the correction, not the narration."""
+        self.reply["choices"][0]["message"]["content"] = (
+            "<think>\nThe user wrote teh, that is a typo.\n</think>\nthe cat")
+        self.assertEqual(self.run_main()["text"], "the cat")
+
+    def test_think_tags_inside_the_text_are_left_alone(self):
+        """Someone proofreading a blog post about reasoning models must not
+        have their own prose eaten."""
+        prose = "I like the <think> tag idea."
+        self.reply["choices"][0]["message"]["content"] = prose
+        self.assertEqual(self.run_main()["text"], prose)
+
+    def test_an_unclosed_think_block_is_left_alone(self):
+        text = "<think> never closed, so this is just text"
+        self.reply["choices"][0]["message"]["content"] = text
+        self.assertEqual(self.run_main()["text"], text)
+
     def test_localhost_needs_no_key(self):
         """ollama and llama.cpp do not have one to give."""
         for url in ("http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://box.local/v1"):
             self.assertTrue(self.mod.is_local(url), url)
         self.assertFalse(self.mod.is_local("https://api.openai.com/v1"))
 
-    def run_main(self):
+    def run_main(self, options=None):
         """Drive the adapter's main() with a payload on a fake stdin."""
-        payload = {"system": "fix it", "text": "teh cat", "model": "llama3.2", "timeoutSec": 30}
+        payload = {"system": "fix it", "text": "teh cat", "model": "llama3.2",
+                   "timeoutSec": 30, "options": options or {}}
         stdin, argv, stdout = sys.stdin, sys.argv, sys.stdout
         sys.stdin = io.StringIO(json.dumps(payload))
         sys.argv = ["openai"]

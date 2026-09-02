@@ -23,6 +23,7 @@
     "defaults": {
       "backend": "anthropic",
       "model": "claude-opus-5",
+      "endpoint": "",
       "profile": "Grammar",
       "timeoutSec": 30,
       "clipboardFallback": true,
@@ -34,6 +35,7 @@
     "schema": [
       { "key": "backend", "type": "string", "label": "Backend", "defaultValue": "anthropic", "description": "Name of an executable in ~/.config/omarchy/scribe/backends/ or the plugin's backends/ directory." },
       { "key": "model", "type": "string", "label": "Model", "defaultValue": "claude-opus-5", "description": "Passed through to the backend verbatim." },
+      { "key": "endpoint", "type": "string", "label": "Endpoint", "defaultValue": "", "description": "Only for the openai backend: the OpenAI-compatible base URL, e.g. http://gpu-box.local:11434/v1 for a remote ollama. Empty uses the backend's own default." },
       { "key": "profile", "type": "string", "label": "Prompt profile", "defaultValue": "Grammar", "description": "Name of a profile in ~/.config/omarchy/scribe/profiles.json." },
       { "key": "timeoutSec", "type": "integer", "label": "Timeout (seconds)", "min": 5, "max": 300, "step": 5, "defaultValue": 30 },
       { "key": "clipboardFallback", "type": "boolean", "label": "Fall back to the clipboard", "defaultValue": true, "description": "When nothing is selected, correct whatever is on the regular clipboard instead." },

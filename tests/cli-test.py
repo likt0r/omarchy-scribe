@@ -45,7 +45,8 @@ json.dump({"text": p["text"].replace("teh", "the"), "model": "echo-1",
 import json, sys
 p = json.load(sys.stdin)
 json.dump({"text": json.dumps({"system": p["system"], "model": p["model"],
-                               "timeoutSec": p["timeoutSec"]})}, sys.stdout)
+                               "timeoutSec": p["timeoutSec"],
+                               "options": p.get("options")})}, sys.stdout)
 """,
     "fenced": """#!/usr/bin/env python3
 import json, sys
@@ -250,6 +251,24 @@ class ScribeTest(unittest.TestCase):
         result = self.correct("x", "--backend", "reflect", "--timeout", "7")
         sent = json.loads(json.loads(result.stdout)["corrected"])
         self.assertEqual(sent["timeoutSec"], 7)
+
+    def test_endpoint_reaches_the_backend_as_an_option(self):
+        """The panel setting has to arrive as options.baseUrl.
+
+        It travels this way rather than as an environment variable because
+        the shell that spawns the CLI inherits its environment from the login
+        session -- a freshly exported URL would not reach it until re-login,
+        which is a poor answer to "point it at my other machine".
+        """
+        result = self.correct("x", "--backend", "reflect",
+                              "--endpoint", "http://gpu-box.local:11434/v1")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertEqual(sent["options"], {"baseUrl": "http://gpu-box.local:11434/v1"})
+
+    def test_no_endpoint_means_no_option(self):
+        result = self.correct("x", "--backend", "reflect")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertEqual(sent["options"], {})
 
     # -------------------------------------------------------------- unwrap
 

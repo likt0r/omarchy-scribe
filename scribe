@@ -445,12 +445,19 @@ def cmd_run(args):
         original, source = read_selection(args.clipboard_fallback)
 
     adapter = find_adapter(args.backend)
+    options = {}
+    # Carried as an option rather than an environment variable because the
+    # shell process that spawns this CLI inherits its environment from the
+    # login session: a newly exported base URL would not reach it until the
+    # next login, which is a poor answer to "point it at my other machine".
+    if args.endpoint:
+        options["baseUrl"] = args.endpoint
     payload = {
         "system": profile["system"],
         "text": original,
         "model": args.model,
         "timeoutSec": args.timeout,
-        "options": {},
+        "options": options,
     }
 
     started = time.monotonic()
@@ -595,8 +602,11 @@ def cmd_doctor(args):
 
     if adapter:
         try:
+            check_argv = [adapter, "--check"]
+            if getattr(args, "endpoint", ""):
+                check_argv += ["--endpoint", args.endpoint]
             completed = subprocess.run(
-                [adapter, "--check"], capture_output=True, text=True, timeout=15
+                check_argv, capture_output=True, text=True, timeout=15
             )
             if completed.returncode == 0:
                 print("ok       credentials  %s" % (last_line(completed.stdout) or "ready"))
@@ -622,6 +632,11 @@ def build_parser():
     run = sub.add_parser("run", help="correct the selection")
     run.add_argument("--backend", default=DEFAULT_BACKEND)
     run.add_argument("--model", default=DEFAULT_MODEL)
+    run.add_argument(
+        "--endpoint",
+        default="",
+        help="OpenAI-compatible base URL for backends that take one (ollama, llama.cpp, ...)",
+    )
     run.add_argument("--profile", default=DEFAULT_PROFILE)
     run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     run.add_argument("--stdin", action="store_true", help="read the text from stdin instead of the selection")
@@ -660,6 +675,7 @@ def build_parser():
 
     doctor = sub.add_parser("doctor", help="check the setup without correcting anything")
     doctor.add_argument("--backend", default=DEFAULT_BACKEND)
+    doctor.add_argument("--endpoint", default="")
     doctor.set_defaults(func=cmd_doctor)
 
     return parser

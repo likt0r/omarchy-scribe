@@ -121,16 +121,43 @@ dropdown rather than a patch. Three ship:
 |---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY`, else the keyring | the default; about a second at `effort: low` |
 | `claude-cli` | none — uses your `claude` login | a few seconds slower (node startup); counts against subscription usage |
-| `openai` | `SCRIBE_OPENAI_API_KEY` / `OPENAI_API_KEY`, else the keyring; not needed for localhost | set `SCRIBE_OPENAI_BASE_URL` for ollama, llama.cpp, LM Studio, OpenRouter, … |
+| `openai` | only for `api.openai.com`; self-hosted needs none | set **Endpoint** in the panel for ollama, llama.cpp, LM Studio, OpenRouter, … |
 
-Running against a local model:
+### Running against ollama
 
-```bash
-# ~/.config/environment.d/scribe.conf
-SCRIBE_OPENAI_BASE_URL=http://localhost:11434/v1
-```
+Set **Backend** to `openai`, **Endpoint** to your server, and **Model** to
+whatever it is serving:
 
-…then set the backend to `openai` and the model to `llama3.2` in the panel.
+| | |
+|---|---|
+| ollama on this machine | `http://localhost:11434/v1` |
+| ollama on another box | `http://gpu-box.local:11434/v1` |
+| llama.cpp | `http://localhost:8080/v1` |
+
+The Endpoint field only appears when the `openai` backend is selected. It is a
+plugin setting rather than only an environment variable on purpose: the shell
+process that spawns Scribe inherits its environment from your login session,
+so an exported `SCRIBE_OPENAI_BASE_URL` would not reach it until the next
+login. The env var still works for driving the CLI by hand, and the setting
+wins when both are present.
+
+No API key is required for anything other than `api.openai.com`, so a
+self-hosted server needs no credentials at all.
+
+`scribe doctor --backend openai --endpoint <url>` pings `/models` and lists
+what the server is serving, which is the quickest way to catch a typo'd host
+or a sleeping box.
+
+A remote ollama over plain HTTP sends your selection across the network
+unencrypted. On your own LAN that is usually fine; over anything else, put it
+behind a tunnel.
+
+**Reasoning models.** qwen3, deepseek-r1 and friends narrate before answering,
+and the OpenAI-compatible shape has nowhere to put that, so it arrives inside
+the reply. Scribe strips a complete leading `<think>…</think>` block. A
+non-reasoning model of the same size (gemma3, mistral) is still the better
+choice here — proofreading does not need deliberation, and you feel every
+token of it.
 
 Writing your own takes about five lines — read one JSON object on stdin, write
 one on stdout. Drop it in `~/.config/omarchy/scribe/backends/` and it shadows
@@ -152,6 +179,8 @@ The panel is a front end for `scribe`, which works on its own:
 echo 'i has bad grammer' | scribe run --stdin            # prints the correction
 scribe run --profile Formal                              # corrects the selection
 scribe run --stdin --json --no-copy < draft.txt          # a result object
+scribe run --backend openai --endpoint http://gpu-box.local:11434/v1 \
+           --model gemma3:4b                             # a remote ollama
 scribe backends                                          # what's discovered
 scribe doctor                                            # what's configured
 scribe history clear

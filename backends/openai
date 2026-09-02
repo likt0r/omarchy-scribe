@@ -3,18 +3,22 @@
 
 Speaks the /v1/chat/completions shape, which is what OpenAI, ollama,
 llama.cpp's server, LM Studio, vLLM, OpenRouter, Groq and most local runners
-expose. Point it somewhere with SCRIBE_OPENAI_BASE_URL:
+expose. Point it somewhere with the panel's Endpoint setting, or with
+SCRIBE_OPENAI_BASE_URL when driving the CLI directly:
 
-    ollama       SCRIBE_OPENAI_BASE_URL=http://localhost:11434/v1
-    llama.cpp    SCRIBE_OPENAI_BASE_URL=http://localhost:8080/v1
-    OpenAI       (the default; needs a key)
+    ollama, this machine   http://localhost:11434/v1
+    ollama, another box    http://gpu-box.local:11434/v1
+    llama.cpp              http://localhost:8080/v1
+    OpenAI                 (the default; needs a key)
 
-Local servers usually want no key at all, so a missing key is only an error
-when the endpoint is a remote one.
+Only api.openai.com is assumed to need a key up front. A self-hosted server
+usually has no auth at all, and hosted providers that do want one answer 401,
+which is reported with their own message.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -34,20 +38,51 @@ KEY_HELP = (
     "with:  secret-tool store --label='OpenAI API key' service openai account api-key"
 )
 
+# Local reasoning models (qwen3, deepseek-r1, ...) narrate before answering
+# and the OpenAI-compatible shape has nowhere to put that, so it arrives
+# inside the content. Stripping a *complete* leading block is unambiguous;
+# anything else is left alone.
+THINK_RE = re.compile(r"^\s*<(think|thinking|reasoning)>.*?</\1>\s*", re.DOTALL | re.IGNORECASE)
+
 
 def fail(code, message):
     print(message, file=sys.stderr)
     sys.exit(code)
 
 
-def base_url():
-    return (os.environ.get("SCRIBE_OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+def base_url(options=None):
+    """Panel setting first, then the environment, then OpenAI.
+
+    The setting wins because the shell process that spawns Scribe inherits
+    its environment from the login session: a freshly exported base URL
+    would not reach it until the next login.
+    """
+    configured = (options or {}).get("baseUrl")
+    return (str(configured or "").strip()
+            or os.environ.get("SCRIBE_OPENAI_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
             or DEFAULT_BASE_URL).rstrip("/")
 
 
 def is_local(url):
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".local")
+
+
+def needs_key(url):
+    """Only OpenAI itself is assumed to require a key up front.
+
+    A self-hosted server -- ollama on this machine or on the box in the next
+    room -- usually has no auth at all, and demanding a key before trying
+    would make the common case impossible. Hosted providers that do want one
+    answer 401, which is reported with their own message.
+    """
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host == "api.openai.com"
+
+
+def strip_thinking(text):
+    return THINK_RE.sub("", text, count=1)
 
 
 def resolve_key():
@@ -62,27 +97,57 @@ def resolve_key():
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
-def check():
-    url = base_url()
+def endpoint_from_argv(argv):
+    if "--endpoint" in argv:
+        index = argv.index("--endpoint")
+        if index + 1 < len(argv):
+            return argv[index + 1]
+    return ""
+
+
+def check(argv):
+    url = base_url({"baseUrl": endpoint_from_argv(argv)})
     key = resolve_key()
-    if not key and not is_local(url):
+    if needs_key(url) and not key:
         fail(EXIT_CONFIG, KEY_HELP % url)
-    print("endpoint %s%s" % (url, "" if not key else " (key …%s)" % key[-4:]))
+
+    # A remote endpoint that is not listening is the failure this catches --
+    # a typo in the host, or the box being asleep. Cheap: /models, not a
+    # completion.
+    try:
+        request = urllib.request.Request(url + "/models", method="GET")
+        if key:
+            request.add_header("authorization", "Bearer %s" % key)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            names = [m.get("id") for m in (json.loads(response.read().decode("utf-8")).get("data") or [])]
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            fail(EXIT_CONFIG, "%s rejected the credentials (%d)." % (url, exc.code))
+        names = None
+    except Exception as exc:
+        fail(EXIT_CONFIG, "Could not reach %s: %s" % (url, exc))
+
+    summary = "endpoint %s" % url
+    if key:
+        summary += " (key …%s)" % key[-4:]
+    if names:
+        summary += " — %d models: %s" % (len(names), ", ".join(sorted(filter(None, names))[:6]))
+    print(summary)
     return EXIT_OK
 
 
 def main():
     if "--check" in sys.argv[1:]:
-        return check()
+        return check(sys.argv[1:])
 
     try:
         payload = json.load(sys.stdin)
     except ValueError as exc:
         fail(EXIT_UPSTREAM, "adapter received invalid JSON: %s" % exc)
 
-    url = base_url()
+    url = base_url(payload.get("options"))
     key = resolve_key()
-    if not key and not is_local(url):
+    if needs_key(url) and not key:
         fail(EXIT_CONFIG, KEY_HELP % url)
 
     body = {
@@ -131,7 +196,7 @@ def main():
     if choice.get("finish_reason") == "length":
         fail(EXIT_UPSTREAM, "The correction was cut off; the selection is too long.")
 
-    text = ((choice.get("message") or {}).get("content")) or ""
+    text = strip_thinking(((choice.get("message") or {}).get("content")) or "")
     if not text.strip():
         fail(EXIT_UPSTREAM, "%s returned no text." % url)
 
