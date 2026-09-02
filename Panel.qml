@@ -291,6 +291,13 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function status(): string { return root.runState }
+
+    // Why the last run failed, without opening the panel. The icon can only
+    // say "something broke"; this is what makes a failure diagnosable from a
+    // terminal or a script.
+    function lastError(): string { return root.lastError }
+    function lastExit(): string { return String(root.lastExitCode) }
+    function command(): string { return root.commandFor().join(" ") }
   }
 
   // ----------------------------------------------------------- bar button

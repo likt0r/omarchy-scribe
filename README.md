@@ -112,6 +112,24 @@ you proofread ends up there in plain text. Three settings cover the range:
 
 `scribe history clear` (or the button in the panel) empties it.
 
+## Talking to the widget
+
+```bash
+omarchy-shell likt0r.scribe correct      # what the keybind calls
+omarchy-shell likt0r.scribe toggle       # open/close the panel
+omarchy-shell likt0r.scribe cancel       # abandon a correction in flight
+omarchy-shell likt0r.scribe status       # idle | working | done | error
+omarchy-shell likt0r.scribe lastError    # why the last run failed
+omarchy-shell likt0r.scribe command      # the exact CLI call it would make
+```
+
+`lastError` and `command` exist because the icon can only say "something
+broke". They turn a red icon into a diagnosable one from a terminal.
+
+Note that the shell loads plugin QML once per session: `shell.json` settings
+hot-reload, but editing `Panel.qml` needs `omarchy restart shell` to take
+effect.
+
 ## Backends
 
 The LLM sits behind a small adapter contract, so swapping providers is a
