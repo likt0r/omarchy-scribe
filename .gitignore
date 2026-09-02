@@ -1,0 +1,9 @@
+# Corrected text is user content. Nothing the plugin produces at runtime
+# belongs in the repo.
+history.json
+profiles.json
+*.pyc
+__pycache__/
+*.tmp
+*.bak
+*.bak.*

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "likt0r.scribe",
+  "name": "Scribe",
+  "version": "0.1.0",
+  "author": "Benjamin Werner",
+  "license": "MIT",
+  "description": "Mark text anywhere, press a key, and a corrected version lands in your clipboard. Scribe reads the primary selection, sends it to an LLM with a prompt that fixes spelling, grammar and punctuation while preserving the original language, tone and formatting, then copies the result back and notifies you. A bar icon shows the request in flight; clicking it opens a panel with the history of past corrections and the settings. The LLM is reached through a small adapter contract -- an Anthropic adapter, a `claude` CLI adapter that needs no API key, and an OpenAI-compatible adapter that also covers ollama ship with the plugin, and any executable honouring the documented stdin/stdout shape can replace them.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Scribe",
+    "description": "Corrects the marked text with an LLM and puts it on the clipboard.",
+    "category": "AI",
+    "aliases": ["scribe", "proofread"],
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "backend": "anthropic",
+      "model": "claude-opus-5",
+      "profile": "Grammar",
+      "timeoutSec": 30,
+      "clipboardFallback": true,
+      "notify": true,
+      "historyEnabled": true,
+      "historyStoreText": true,
+      "historyLimit": 50
+    },
+    "schema": [
+      { "key": "backend", "type": "string", "label": "Backend", "defaultValue": "anthropic", "description": "Name of an executable in ~/.config/omarchy/scribe/backends/ or the plugin's backends/ directory." },
+      { "key": "model", "type": "string", "label": "Model", "defaultValue": "claude-opus-5", "description": "Passed through to the backend verbatim." },
+      { "key": "profile", "type": "string", "label": "Prompt profile", "defaultValue": "Grammar", "description": "Name of a profile in ~/.config/omarchy/scribe/profiles.json." },
+      { "key": "timeoutSec", "type": "integer", "label": "Timeout (seconds)", "min": 5, "max": 300, "step": 5, "defaultValue": 30 },
+      { "key": "clipboardFallback", "type": "boolean", "label": "Fall back to the clipboard", "defaultValue": true, "description": "When nothing is selected, correct whatever is on the regular clipboard instead." },
+      { "key": "notify", "type": "boolean", "label": "Notify on success", "defaultValue": true },
+      { "key": "historyEnabled", "type": "boolean", "label": "Keep a history", "defaultValue": true, "description": "Off writes nothing to disk at all." },
+      { "key": "historyStoreText", "type": "boolean", "label": "Store the text in history", "defaultValue": true, "description": "Off keeps only timestamps, model and length -- no corrected text on disk." },
+      { "key": "historyLimit", "type": "integer", "label": "History entries", "min": 0, "max": 500, "step": 10, "defaultValue": 50 }
+    ]
+  }
+}

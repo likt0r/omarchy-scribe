@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish a release for
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: ./tests/run-tests.sh
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          version="$(node -p 'require("./manifest.json").version')"
+          title="$(node -p 'require("./manifest.json").name') $version"
+
+          # The tag is what users pin to; a mismatch means one of the two was
+          # forgotten, and shipping either would be a lie about the version.
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match manifest.json version $version"
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists, leaving it untouched"
+            exit 0
+          fi
+
+          gh release create "$TAG" --title "$title" --generate-notes

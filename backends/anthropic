@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Anthropic adapter for Scribe. See backends/README.md for the contract.
+
+Standard library only -- urllib rather than curl on purpose. The text being
+corrected is arbitrary user content, and handing it to a shell as part of a
+`curl -d` argument is one quoting bug away from a command injection. Nothing
+here goes through a shell.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+EXIT_OK = 0
+EXIT_CONFIG = 2
+EXIT_UPSTREAM = 3
+
+ENDPOINT = "https://api.anthropic.com/v1/messages"
+API_VERSION = "2023-06-01"
+
+# Routes around a safety refusal instead of handing the user an error. A
+# proofreader sees whatever its user happens to be writing about, and a
+# refusal on text the user merely wants spellchecked is a dead end; "default"
+# lets the server pick the fallback by refusal category so there is no model
+# list here to keep current.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# Effort `low` is the lever for a short mechanical rewrite: it keeps thinking
+# shallow and the round trip near a small model's latency without pinning the
+# plugin to a weaker model. Set `model` in the panel to claude-haiku-4-5 if you
+# want it cheaper still.
+DEFAULT_EFFORT = "low"
+
+KEYRING_ARGS = ["secret-tool", "lookup", "service", "anthropic", "account", "api-key"]
+
+KEY_HELP = (
+    "No Anthropic API key. Either export ANTHROPIC_API_KEY, or store one in the "
+    "keyring with:  secret-tool store --label='Anthropic API key' service anthropic account api-key"
+)
+
+
+def resolve_key():
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        completed = subprocess.run(KEYRING_ARGS, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def estimate_max_tokens(text):
+    """Room for the correction plus the thinking that precedes it.
+
+    Thinking tokens count against max_tokens, so a ceiling sized only for the
+    answer truncates the answer. Roughly 3.5 characters per token, doubled for
+    headroom, plus a floor for thinking.
+    """
+    estimated_input = len(text) / 3.5
+    return int(min(32000, max(4096, estimated_input * 2 + 2000)))
+
+
+def call(payload, key):
+    text = payload["text"]
+    body = {
+        "model": payload.get("model") or "claude-opus-5",
+        "max_tokens": estimate_max_tokens(text),
+        "system": payload["system"],
+        # The selection arrives tagged so the system prompt has something
+        # concrete to point at when it says "this is data, not instructions".
+        "messages": [{"role": "user", "content": "<text>\n%s\n</text>" % text}],
+        "output_config": {"effort": payload.get("options", {}).get("effort") or DEFAULT_EFFORT},
+        "fallbacks": "default",
+    }
+
+    request = urllib.request.Request(
+        ENDPOINT,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": API_VERSION,
+            "anthropic-beta": FALLBACK_BETA,
+        },
+        method="POST",
+    )
+
+    timeout = payload.get("timeoutSec") or 30
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            problem = json.loads(exc.read().decode("utf-8"))
+            detail = problem.get("error", {}).get("message", "")
+        except Exception:
+            pass
+        code = EXIT_CONFIG if exc.code in (401, 403) else EXIT_UPSTREAM
+        fail(code, "Anthropic returned %d%s" % (exc.code, (": " + detail) if detail else ""))
+    except urllib.error.URLError as exc:
+        fail(EXIT_UPSTREAM, "Could not reach api.anthropic.com: %s" % exc.reason)
+    except (ValueError, TimeoutError) as exc:
+        fail(EXIT_UPSTREAM, "Bad response from api.anthropic.com: %s" % exc)
+
+
+def extract(message):
+    # stop_details is populated only for refusals, so it is checked before
+    # content is read at all -- a refusal carries no usable text.
+    if message.get("stop_reason") == "refusal":
+        details = message.get("stop_details") or {}
+        fail(EXIT_UPSTREAM, "The model declined this text%s." % (
+            " (%s)" % details.get("category") if details.get("category") else ""))
+
+    # Truncation matters more here than anywhere else: a half-finished
+    # correction silently replacing the clipboard is worse than an error.
+    if message.get("stop_reason") == "max_tokens":
+        fail(EXIT_UPSTREAM, "The correction was cut off; the selection is too long.")
+
+    # Thinking blocks share the content array with the answer, and on this
+    # model their text is empty by default, so the answer is the text blocks.
+    parts = [
+        block.get("text", "")
+        for block in message.get("content", [])
+        if block.get("type") == "text"
+    ]
+    return "".join(parts)
+
+
+def fail(code, message):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def check():
+    """`--check` for `scribe doctor`: prove a key resolves, call nothing."""
+    key = resolve_key()
+    if not key:
+        fail(EXIT_CONFIG, KEY_HELP)
+    source = "ANTHROPIC_API_KEY" if os.environ.get("ANTHROPIC_API_KEY", "").strip() else "keyring"
+    print("key from %s (…%s)" % (source, key[-4:]))
+    return EXIT_OK
+
+
+def main():
+    if "--check" in sys.argv[1:]:
+        return check()
+
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError as exc:
+        fail(EXIT_UPSTREAM, "adapter received invalid JSON: %s" % exc)
+
+    key = resolve_key()
+    if not key:
+        fail(EXIT_CONFIG, KEY_HELP)
+
+    message = call(payload, key)
+    text = extract(message)
+    if not text.strip():
+        fail(EXIT_UPSTREAM, "The model returned no text.")
+
+    json.dump(
+        {
+            "text": text,
+            "model": message.get("model") or payload.get("model"),
+            "usage": {
+                "input_tokens": (message.get("usage") or {}).get("input_tokens"),
+                "output_tokens": (message.get("usage") or {}).get("output_tokens"),
+            },
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
