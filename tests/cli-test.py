@@ -173,9 +173,111 @@ class ScribeTest(unittest.TestCase):
         path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"profiles": [{"name": "Mine", "system": "do my thing"}]}, handle)
+            json.dump({"profiles": [{"name": "Mine", "title": "Mine", "system": "do my thing"}]}, handle)
         result = self.run_scribe("profiles")
         self.assertEqual(result.stdout.strip(), "Mine")
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["profiles"][0]["system"], "do my thing")
+
+    def test_profiles_seeded_today_carry_titles(self):
+        self.run_scribe("profiles")
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        with open(path, encoding="utf-8") as handle:
+            profiles = json.load(handle)["profiles"]
+        self.assertTrue(all(p.get("title") for p in profiles), profiles)
+
+    # ------------------------------------------------------------- migration
+
+    def test_a_file_without_titles_is_migrated_once(self):
+        """The upgrade adds `title` and leaves `name` exactly as it was.
+
+        `name` is what shell.json and every history entry refer to. Rewriting
+        it would send resolve_profile down its fallback and silently correct
+        with a different prompt than the one the user chose.
+        """
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        original = {"profiles": [
+            {"name": "Grammar + style", "system": "tighten it"},
+            {"name": "Mine", "system": "do my thing"},
+        ]}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(original, handle)
+
+        self.run_scribe("profiles")
+
+        with open(path, encoding="utf-8") as handle:
+            migrated = json.load(handle)["profiles"]
+        self.assertEqual([p["name"] for p in migrated], ["Grammar + style", "Mine"])
+        self.assertEqual([p["title"] for p in migrated], ["Grammar + style", "Mine"])
+        self.assertEqual([p["system"] for p in migrated], ["tighten it", "do my thing"])
+
+        with open(path + ".bak", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), original)
+
+    def test_migration_keeps_the_file_private(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"profiles": [{"name": "Mine", "system": "do my thing"}]}, handle)
+        os.chmod(path, 0o600)
+        self.run_scribe("profiles")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_migration_does_not_clobber_an_existing_backup(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".bak", "w", encoding="utf-8") as handle:
+            handle.write("the first backup")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"profiles": [{"name": "Mine", "system": "do my thing"}]}, handle)
+        self.run_scribe("profiles")
+        with open(path + ".bak", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "the first backup")
+
+    def test_a_migrated_file_is_not_migrated_again(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        self.run_scribe("profiles")
+        self.assertFalse(os.path.exists(path + ".bak"))
+
+    # ------------------------------------------------------------ saving
+
+    def test_profiles_save_replaces_the_file(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        self.run_scribe("profiles")
+        payload = {"profiles": [{"name": "quick", "title": "Shorten", "system": "shorten the <text>"}]}
+        result = self.run_scribe("profiles", "save", stdin=json.dumps(payload))
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["profiles"], payload["profiles"])
+        self.assertEqual(self.run_scribe("profiles").stdout.strip(), "quick")
+
+    def test_profiles_save_keeps_the_file_private(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        payload = {"profiles": [{"name": "quick", "title": "Shorten", "system": "shorten it"}]}
+        self.run_scribe("profiles", "save", stdin=json.dumps(payload))
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_profiles_save_fills_in_a_missing_title(self):
+        payload = {"profiles": [{"name": "quick", "system": "shorten it"}]}
+        result = self.run_scribe("profiles", "save", stdin=json.dumps(payload))
+        self.assertEqual(json.loads(result.stdout)["profiles"][0]["title"], "quick")
+
+    def test_profiles_save_refuses_to_empty_the_file(self):
+        """An empty save would strand the user's prompts with no way back."""
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        self.run_scribe("profiles")
+        before = open(path, encoding="utf-8").read()
+
+        for payload in ('{"profiles": []}', '{"profiles": [{"name": "", "system": ""}]}'):
+            result = self.run_scribe("profiles", "save", stdin=payload)
+            self.assertEqual(result.returncode, EXIT_CONFIG, result.stdout)
+            self.assertEqual(open(path, encoding="utf-8").read(), before)
+
+    def test_profiles_save_rejects_junk(self):
+        result = self.run_scribe("profiles", "save", stdin="not json at all")
+        self.assertEqual(result.returncode, EXIT_USAGE)
+        self.assertIn("stdin", result.stderr)
 
     def test_corrupt_profiles_fall_back_to_the_builtins(self):
         """A half-saved profiles.json must not block a correction."""
@@ -186,6 +288,60 @@ class ScribeTest(unittest.TestCase):
         result = self.run_scribe("profiles")
         self.assertEqual(result.returncode, EXIT_OK)
         self.assertIn("Grammar", result.stdout)
+
+    # ----------------------------------------------------- custom instruction
+
+    def test_an_instruction_reaches_the_backend_inside_the_frame(self):
+        result = self.correct("x", "--backend", "reflect",
+                              "--instruction", "make it one sentence")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertIn("make it one sentence", sent["system"])
+        # The guards have to survive the composition, or the picker grows a
+        # path where untrusted text is no longer quarantined.
+        self.assertIn("<text>", sent["system"])
+        self.assertIn("nothing else", sent["system"])
+        self.assertIn("Never", sent["system"])
+
+    def test_an_instruction_beats_a_profile(self):
+        result = self.correct("x", "--backend", "reflect",
+                              "--profile", "Formal",
+                              "--instruction", "make it one sentence")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertIn("make it one sentence", sent["system"])
+        self.assertNotIn("raise the register", sent["system"])
+
+    def test_an_instruction_run_is_labelled_custom(self):
+        result = self.correct("x", "--backend", "echo",
+                              "--instruction", "make it one sentence")
+        self.assertEqual(json.loads(result.stdout)["profile"], "Custom")
+
+    def test_an_empty_instruction_falls_back_to_the_profile(self):
+        """An empty --instruction is absence, not a request for nothing."""
+        result = self.correct("x", "--backend", "reflect", "--instruction", "")
+        sent = json.loads(json.loads(result.stdout)["corrected"])
+        self.assertIn("correct spelling", sent["system"].lower())
+
+    def test_a_blank_instruction_is_refused(self):
+        result = self.correct("x", "--backend", "echo", "--instruction", "   ")
+        self.assertEqual(result.returncode, EXIT_USAGE, result.stdout)
+        self.assertIn("empty instruction", result.stderr)
+
+    def test_the_instruction_is_recorded_with_the_text(self):
+        self.correct("teh cat", "--backend", "echo",
+                     "--instruction", "make it one sentence")
+        entry = self.history()[0]
+        self.assertEqual(entry["profile"], "Custom")
+        self.assertEqual(entry["instruction"], "make it one sentence")
+
+    def test_the_instruction_is_not_recorded_without_the_text(self):
+        """It is text the user wrote, so metadata-only has to drop it too."""
+        self.correct("teh cat", "--backend", "echo",
+                     "--instruction", "make it one sentence",
+                     "--history-metadata-only")
+        entry = self.history()[0]
+        self.assertEqual(entry["profile"], "Custom")
+        self.assertNotIn("instruction", entry)
+        self.assertNotIn("original", entry)
 
     def test_the_selection_is_tagged_as_data(self):
         """The prompt-injection guard the profiles rely on has to be real."""

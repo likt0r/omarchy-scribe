@@ -124,9 +124,79 @@ function normalizeProfiles(raw) {
     var system = String(p.system === undefined ? "" : p.system).trim()
     if (name === "" || system === "" || seen[name]) continue
     seen[name] = true
-    out.push({ name: name, system: system })
+    // `name` is the identity -- what --profile takes and what shell.json
+    // stores -- and `title` is only the label, so a title the user renamed or
+    // never set falls back to the name instead of showing an empty tile. Kept
+    // in step with normalize_profiles() in `scribe`.
+    var title = String(p.title === undefined ? "" : p.title).trim()
+    out.push({ name: name, title: title === "" ? name : title, system: system })
   }
   return out
+}
+
+// The label for a profile the picker and the dropdown show. Takes the object
+// or the bare name, so a caller holding only what shell.json stored can still
+// ask for a title.
+function profileTitle(profiles, wanted) {
+  var profile = typeof wanted === "object" && wanted !== null
+    ? wanted : resolveProfile(profiles, wanted)
+  if (!profile) return String(wanted || "")
+  return profile.title || profile.name
+}
+
+// A name for a newly created profile, derived from its title. `name` is the
+// identity the settings and the history store, so it is generated once and
+// then frozen -- renaming the title later must not orphan either. Suffixed
+// until it is unique, because a duplicate name is dropped by normalize.
+function profileName(title, taken) {
+  var base = String(title || "").trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+  if (base === "") base = "prompt"
+  var used = {}
+  var list = taken || []
+  for (var i = 0; i < list.length; i++) {
+    used[typeof list[i] === "object" && list[i] !== null ? list[i].name : list[i]] = true
+  }
+  if (!used[base]) return base
+  for (var n = 2; ; n++) {
+    if (!used[base + "-" + n]) return base + "-" + n
+  }
+}
+
+// ---- The picker grid.
+//
+// The tiles are laid out as square as the count allows, so eight prompts are
+// 3x3 with a gap rather than 8x1. A ragged last row is left as it falls.
+function gridColumns(count) {
+  return count > 0 ? Math.ceil(Math.sqrt(count)) : 1
+}
+
+// Cursor movement, clamped rather than wrapped. Wrapping in a grid whose last
+// row is ragged puts the cursor somewhere the eye did not follow; clamping
+// means a held arrow key stops at the edge, which is what a grid of a dozen
+// tiles wants. Moving down out of a short last column lands on the last tile
+// rather than nowhere.
+function moveIndex(index, dx, dy, count, columns) {
+  if (count <= 0) return 0
+  var cols = columns > 0 ? columns : gridColumns(count)
+  var current = Math.min(Math.max(index, 0), count - 1)
+  if (dx) {
+    var row = Math.floor(current / cols)
+    var next = current + dx
+    if (next < row * cols || next > Math.min(row * cols + cols - 1, count - 1)) return current
+    return next
+  }
+  if (dy) {
+    var target = current + dy * cols
+    if (target < 0) return current
+    if (target < count) return target
+    // Past the end going down. Only a tile standing above the ragged gap
+    // slides to the last tile; one already in the bottom row stays put, so a
+    // held Down key does not creep sideways along it.
+    var inLastRow = Math.floor(current / cols) === Math.floor((count - 1) / cols)
+    return dy > 0 && !inLastRow ? count - 1 : current
+  }
+  return current
 }
 
 // Falls through to the first profile rather than erroring: a correction that
@@ -163,6 +233,10 @@ function historyEntry(run, opts) {
   if (o.storeText !== false) {
     entry.original = original
     entry.corrected = corrected
+    // A one-off instruction is text the user wrote, so it keeps the company
+    // of the other text and goes with it under metadata-only. Kept in step
+    // with record_history() in `scribe`.
+    if (run.instruction) entry.instruction = String(run.instruction)
   }
   return entry
 }
@@ -275,6 +349,10 @@ if (typeof module !== "undefined") {
     adapterChoices: adapterChoices,
     normalizeProfiles: normalizeProfiles,
     resolveProfile: resolveProfile,
+    profileTitle: profileTitle,
+    profileName: profileName,
+    gridColumns: gridColumns,
+    moveIndex: moveIndex,
     historyEntry: historyEntry,
     hasText: hasText,
     appendHistory: appendHistory,

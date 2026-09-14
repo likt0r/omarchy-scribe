@@ -85,10 +85,10 @@ check('choices drop invalid names',
 
 const rawProfiles = {
   profiles: [
-    { name: 'Grammar', system: 'fix it' },
-    { name: 'Empty', system: '   ' },
-    { name: '', system: 'nameless' },
-    { name: 'Grammar', system: 'duplicate' },
+    { name: 'Grammar', title: 'Spelling', system: 'fix it' },
+    { name: 'Empty', title: 'Empty', system: '   ' },
+    { name: '', title: 'Nameless', system: 'nameless' },
+    { name: 'Grammar', title: 'Duplicate', system: 'duplicate' },
     'not an object',
     { name: 'Formal', system: 'be formal' }
   ]
@@ -96,10 +96,18 @@ const rawProfiles = {
 
 check('profiles drop the unusable and the duplicated',
   Model.normalizeProfiles(rawProfiles),
-  [{ name: 'Grammar', system: 'fix it' }, { name: 'Formal', system: 'be formal' }])
+  [{ name: 'Grammar', title: 'Spelling', system: 'fix it' },
+   { name: 'Formal', title: 'Formal', system: 'be formal' }])
 check('a missing profiles array is empty, not a throw',
   Model.normalizeProfiles({}), [])
 check('null is empty', Model.normalizeProfiles(null), [])
+
+// A file written before titles existed still has to render: the tile shows
+// the name rather than an empty square.
+check('a missing title falls back to the name',
+  Model.normalizeProfiles({ profiles: [{ name: 'Formal', system: 'x' }] })[0].title, 'Formal')
+check('a blank title falls back to the name',
+  Model.normalizeProfiles({ profiles: [{ name: 'Formal', title: '  ', system: 'x' }] })[0].title, 'Formal')
 
 const profiles = Model.normalizeProfiles(rawProfiles)
 check('the named profile wins', Model.resolveProfile(profiles, 'Formal').system, 'be formal')
@@ -108,6 +116,49 @@ check('the named profile wins', Model.resolveProfile(profiles, 'Formal').system,
 check('an unknown name falls back to the first',
   Model.resolveProfile(profiles, 'Deleted').name, 'Grammar')
 check('no profiles resolves to null', Model.resolveProfile([], 'Grammar'), null)
+
+check('a title is looked up by name', Model.profileTitle(profiles, 'Grammar'), 'Spelling')
+check('a profile object is accepted directly',
+  Model.profileTitle(profiles, profiles[1]), 'Formal')
+// The settings can name a profile that no longer exists; the label shown must
+// not silently become the first profile's.
+check('an unknown name keeps its own label', Model.profileTitle([], 'Deleted'), 'Deleted')
+
+// ---- Names generated for new profiles.
+
+check('a name is slugged from the title', Model.profileName('Kürzen und straffen', []), 'k-rzen-und-straffen')
+check('a taken name is suffixed', Model.profileName('Formal', ['formal']), 'formal-2')
+check('suffixes keep counting', Model.profileName('Formal', ['formal', 'formal-2']), 'formal-3')
+check('profile objects count as taken', Model.profileName('Formal', [{ name: 'formal' }]), 'formal-2')
+check('a title with no letters still yields a name', Model.profileName('!!!', []), 'prompt')
+check('an empty title still yields a name', Model.profileName('', []), 'prompt')
+
+// ---------------------------------------------------------------- the grid
+
+check('one prompt is one column', Model.gridColumns(1), 1)
+check('three prompts are 2x2', Model.gridColumns(3), 2)
+check('four prompts are 2x2', Model.gridColumns(4), 2)
+check('five prompts are 3 wide', Model.gridColumns(5), 3)
+check('nine prompts are 3x3', Model.gridColumns(9), 3)
+check('ten prompts are 4 wide', Model.gridColumns(10), 4)
+check('no prompts still has a column', Model.gridColumns(0), 1)
+
+// Clamped, never wrapped: a held arrow key stops at the edge instead of
+// reappearing somewhere the eye did not follow.
+check('right moves along the row', Model.moveIndex(0, 1, 0, 9, 3), 1)
+check('right stops at the row end', Model.moveIndex(2, 1, 0, 9, 3), 2)
+check('left stops at the row start', Model.moveIndex(3, -1, 0, 9, 3), 3)
+check('down moves a whole row', Model.moveIndex(1, 0, 1, 9, 3), 4)
+check('up moves a whole row', Model.moveIndex(4, 0, -1, 9, 3), 1)
+check('up stops in the top row', Model.moveIndex(1, 0, -1, 9, 3), 1)
+check('down stops in the bottom row', Model.moveIndex(7, 0, 1, 9, 3), 7)
+// Five tiles in a 3-wide grid leave the bottom row half empty. Down from the
+// tile above the gap lands on the last tile, not on nothing.
+check('down out of a ragged row lands on the last tile', Model.moveIndex(2, 0, 1, 5, 3), 4)
+check('down from the last tile stays put', Model.moveIndex(4, 0, 1, 5, 3), 4)
+check('right into the ragged gap stays put', Model.moveIndex(4, 1, 0, 5, 3), 4)
+check('an out-of-range index is pulled back in', Model.moveIndex(99, 0, 0, 5, 3), 4)
+check('an empty grid stays at zero', Model.moveIndex(0, 1, 0, 0, 1), 0)
 
 // ------------------------------------------------------------------- history
 

@@ -3,6 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -63,20 +65,53 @@ Panel {
     if (runState === Model.STATE_DONE) doneTimer.restart()
   }
 
+  // The keybind now asks which prompt to use instead of assuming one. The
+  // mouse path and the scriptable path still run straight away -- see
+  // correctNow() -- because neither has a keyboard in hand to answer with.
   function correct() {
+    openPicker()
+  }
+
+  function correctNow() {
+    correctWith("")
+  }
+
+  // Run a one-off instruction instead of a stored prompt. The CLI wraps it in
+  // the rules that keep the selection quarantined as data; this side only
+  // refuses an empty one early so the UI and a script answer alike.
+  function correctCustom(instruction) {
+    var text = String(instruction || "").trim()
+    if (text === "") return
+    correctWith("", text)
+  }
+
+  // `profileOverride` is the picker's answer, empty for "whatever the
+  // settings say". It never touches the stored setting: see activatePicker().
+  function correctWith(profileOverride, instructionOverride) {
     // A second keypress mid-flight is deliberately ignored rather than
     // queued: two adapters racing to wl-copy would leave the clipboard with
     // whichever finished last, which need not be the one being waited for.
     if (busy) return
+    // Marked here rather than in correct(): with a picker in front of the
+    // run, marking on the keypress would sweep the bar rule for as long as
+    // the user takes to choose, which reads as a correction already underway.
     broadcast("markWorking")
     lastError = ""
-    correctProc.command = commandFor()
+    correctProc.command = commandFor(profileOverride, instructionOverride)
     correctProc.running = true
   }
 
   function markWorking() { apply("start") }
 
   function cancel() {
+    // Cancel means "stop what you started", and an open picker is the first
+    // thing that qualifies. It also gives the overlay a way out that does not
+    // depend on its own key handling: right click on the icon, or the IPC
+    // verb, dismisses it even if something inside the surface is wedged.
+    if (pickerOpen) {
+      closePicker()
+      return
+    }
     if (!busy) return
     correctProc.running = false
     broadcast("markCancelled")
@@ -84,15 +119,18 @@ Panel {
 
   function markCancelled() { apply("cancel") }
 
-  function commandFor() {
+  function commandFor(profileOverride, instructionOverride) {
     var argv = [
       pluginDir + "/scribe", "run", "--json",
       "--backend", backend,
       "--model", model,
-      "--profile", profile,
+      "--profile", profileOverride ? profileOverride : profile,
       "--timeout", String(timeoutSec),
       "--history-limit", String(historyLimit)
     ]
+    // The CLI lets an instruction win over the profile, so both can be passed
+    // and the one that matters is unambiguous at the other end.
+    if (instructionOverride) argv = argv.concat(["--instruction", instructionOverride])
     if (endpoint !== "") argv = argv.concat(["--endpoint", endpoint])
     if (effort !== "") argv = argv.concat(["--effort", effort])
     if (!clipboardFallback) argv.push("--no-clipboard-fallback")
@@ -128,17 +166,244 @@ Panel {
 
   // ---------------------------------------------------------- panel state
 
-  property int tabIndex: 0            // 0 = history, 1 = settings
+  property int tabIndex: 0            // 0 = history, 1 = settings, 2 = prompts
+  readonly property var tabValues: ["history", "settings", "prompts"]
   property int expandedIndex: -1
   property var history: []
-  property var profileNames: []
+  // The full {name, title, system} objects, not just the names: the picker
+  // shows titles, the Prompts tab edits the text, and both need what the CLI
+  // already sends.
+  property var profiles: []
   property var backendNames: []
   property string doctorReport: ""
+
+  readonly property var profileOptions: profiles.map(function(p) {
+    return { value: p.name, label: p.title || p.name }
+  })
 
   function refresh() {
     historyFile.reload()
     profilesProc.running = true
     backendsProc.running = true
+  }
+
+  // ---------------------------------------------------------- prompt picker
+
+  property bool pickerOpen: false
+  property int pickerIndex: 0
+  property string pendingProfile: ""
+  property string pendingInstruction: ""
+  property bool pickerWanted: false
+
+  // "grid" picks a saved prompt, "compose" types a one-off instruction.
+  property string pickerMode: "grid"
+  // Remembered for the next open, in memory only. Persisting it would mean a
+  // new manifest key -- defaults, schema and a literal setting() read, all
+  // three gated by the suite -- for a string nobody asked to keep past a
+  // shell restart.
+  property string lastInstruction: ""
+
+  // One more tile than there are prompts: the last one composes a one-off.
+  readonly property int pickerCount: profiles.length + 1
+  readonly property int pickerColumns: Model.gridColumns(pickerCount)
+
+  // The profiles are read when the panel opens, but the keybind reaches a
+  // shell where that may never have happened. Loading them up front means the
+  // first press of the day shows a grid instead of nothing.
+  Component.onCompleted: profilesProc.running = true
+
+  function openPicker() {
+    if (busy) return
+    if (profiles.length === 0) {
+      // Nothing to show yet: remember the ask and let the load finish it.
+      pickerWanted = true
+      profilesProc.running = true
+      return
+    }
+    // Two layer surfaces both asking for exclusive keyboard focus is a fight
+    // neither wins, and the panel is the one that can wait.
+    if (opened) close()
+    pickerMode = "grid"
+    pickerIndex = Math.max(0, profiles.map(function(p) { return p.name }).indexOf(profile))
+    pickerOpen = true
+    Qt.callLater(function() { pickerKeys.forceActiveFocus() })
+  }
+
+  function closePicker() {
+    pickerOpen = false
+    pickerMode = "grid"
+  }
+
+  function movePicker(dx, dy) {
+    pickerIndex = Model.moveIndex(pickerIndex, dx, dy, pickerCount, pickerColumns)
+  }
+
+  function activatePicker() {
+    // The last tile is the composer, not a prompt.
+    if (pickerIndex >= profiles.length) {
+      openCompose()
+      return
+    }
+    var chosen = profiles[pickerIndex]
+    if (!chosen) return
+    // Remembered as the new default, so the next "keybind, Enter" repeats
+    // this choice. updateEntryInline diffs before persisting, so re-picking
+    // the same prompt writes nothing.
+    if (chosen.name !== profile) updateSetting("profile", chosen.name)
+    pendingProfile = chosen.name
+    // The surface goes first, the work second. An exclusive layer surface
+    // swallows what Hyprland is asked to do underneath it (the lesson from
+    // likt0r.overview), and a notification raised behind a full-screen
+    // overlay is a notification nobody sees.
+    pickerOpen = false
+    pickerRun.restart()
+  }
+
+  function openCompose() {
+    pickerMode = "compose"
+    // Prefilled with the last one and selected, so repeating it is Enter and
+    // replacing it is typing -- neither costs a backspace.
+    instructionArea.text = lastInstruction
+    Qt.callLater(function() {
+      instructionArea.forceActiveFocus()
+      instructionArea.selectAll()
+    })
+  }
+
+  function closeCompose() {
+    pickerMode = "grid"
+    Qt.callLater(function() { pickerKeys.forceActiveFocus() })
+  }
+
+  // A one-off instruction. The CLI frames it with the same four rules every
+  // stored prompt carries -- see compose_custom() in `scribe` -- so this path
+  // never hands raw typed words to the model as its system prompt.
+  function runCustom(instruction) {
+    var text = String(instruction || "").trim()
+    if (text === "") return
+    lastInstruction = text
+    pendingInstruction = text
+    pickerOpen = false
+    pickerMode = "grid"
+    pickerRun.restart()
+  }
+
+  Timer {
+    id: pickerRun
+    interval: 50
+    onTriggered: {
+      var chosen = root.pendingProfile
+      var typed = root.pendingInstruction
+      root.pendingProfile = ""
+      root.pendingInstruction = ""
+      if (typed !== "") root.correctCustom(typed)
+      else root.correctWith(chosen)
+    }
+  }
+
+  // ------------------------------------------------------------ prompt edits
+
+  // The draft is the editor's state, kept apart from `profiles` so that
+  // nothing reaches disk until Save. It survives the panel closing, because
+  // root outlives the popup -- an accidental Escape must not throw away a
+  // paragraph someone just wrote.
+  property string draftName: ""
+  property string draftTitle: ""
+  property string draftSystem: ""
+  property string promptsError: ""
+
+  readonly property var draftProfile: {
+    for (var i = 0; i < profiles.length; i++)
+      if (profiles[i].name === draftName) return profiles[i]
+    return null
+  }
+
+  readonly property bool draftIsNew: draftName !== "" && draftProfile === null
+
+  readonly property bool promptsDirty: draftName !== ""
+    && (draftIsNew
+        || draftTitle !== draftProfile.title
+        || draftSystem !== draftProfile.system)
+
+  // The two rules every shipped prompt carries. A hand-written prompt that
+  // drops them still saves -- it is the user's file -- but the editor says so,
+  // because without them the selection stops being quarantined as data.
+  readonly property bool draftGuarded: draftSystem.indexOf("<text>") >= 0
+    && draftSystem.toLowerCase().indexOf("nothing else") >= 0
+
+  function selectPrompt(name) {
+    draftName = name
+    var found = null
+    for (var i = 0; i < profiles.length; i++)
+      if (profiles[i].name === name) found = profiles[i]
+    loadDraft(found ? found.title : "", found ? found.system : "")
+  }
+
+  // The editors are written to rather than bound. A `text:` binding onto the
+  // draft survives only until the first keystroke -- typing assigns text
+  // imperatively and breaks it -- after which selecting another prompt would
+  // leave the previous one's words on screen.
+  function loadDraft(title, system) {
+    draftTitle = title
+    draftSystem = system
+    promptsError = ""
+    if (typeof titleField !== "undefined" && titleField) titleField.text = title
+    if (typeof systemArea !== "undefined" && systemArea) systemArea.text = system
+  }
+
+  // Keeps the editor pointed at something real after a reload or a delete,
+  // without disturbing an edit in progress.
+  function syncDraft() {
+    if (profiles.length === 0) return
+    if (draftName === "" || (draftProfile === null && !promptsDirty))
+      selectPrompt(profiles[0].name)
+  }
+
+  function newPrompt() {
+    // The name is generated once from the title and then frozen: it is what
+    // shell.json and every history entry refer to, so a later rename of the
+    // title must not orphan them.
+    var title = "New prompt"
+    draftName = Model.profileName(title, profiles)
+    // Seeded from an existing prompt rather than blank, so a new one inherits
+    // the two rules that keep the selection quarantined as data instead of
+    // starting life without them.
+    loadDraft(title, profiles.length > 0 ? profiles[0].system : "")
+    tabIndex = 2
+  }
+
+  function savePrompts() {
+    if (draftName === "" || draftTitle.trim() === "" || draftSystem.trim() === "") {
+      promptsError = "A prompt needs a title and a text."
+      return
+    }
+    var out = []
+    var replaced = false
+    for (var i = 0; i < profiles.length; i++) {
+      if (profiles[i].name === draftName) {
+        out.push({ name: draftName, title: draftTitle, system: draftSystem })
+        replaced = true
+      } else {
+        out.push(profiles[i])
+      }
+    }
+    if (!replaced) out.push({ name: draftName, title: draftTitle, system: draftSystem })
+    writeProfiles(out)
+  }
+
+  function deletePrompt(name) {
+    if (profiles.length <= 1) return
+    var out = profiles.filter(function(p) { return p.name !== name })
+    // The setting would otherwise point at a prompt that no longer exists,
+    // and resolve_profile would quietly correct with the first one instead.
+    if (profile === name) updateSetting("profile", out[0].name)
+    draftName = ""
+    writeProfiles(out)
+  }
+
+  function writeProfiles(list) {
+    saveProc.payload = JSON.stringify({ profiles: list })
+    saveProc.running = true
   }
 
   function updateSetting(key, value) {
@@ -229,13 +494,60 @@ Panel {
     command: [root.pluginDir + "/scribe", "profiles", "--json"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: {
-        try {
-          var parsed = JSON.parse(text)
-          root.profileNames = (parsed.profiles || []).map(function(p) { return p.name })
-        } catch (e) { root.profileNames = [] }
+      onStreamFinished: root.adoptProfiles(text)
+    }
+  }
+
+  // The CLI decides what a valid profile is; this side only has to agree with
+  // it. Routing the answer through the same normalizer the tests cover means
+  // the panel cannot hold a shape the CLI would reject on the next read.
+  function adoptProfiles(payload) {
+    var parsed = null
+    try { parsed = JSON.parse(payload) } catch (e) { parsed = null }
+    profiles = Model.normalizeProfiles(parsed)
+    if (pickerIndex >= profiles.length) pickerIndex = Math.max(0, profiles.length - 1)
+    syncDraft()
+    if (pickerWanted && profiles.length > 0) {
+      pickerWanted = false
+      openPicker()
+    }
+  }
+
+  // Saving goes through the CLI rather than writing the file from here:
+  // write_private keeps it at 0600 and the replace atomic, and one writer
+  // means one idea of what a valid profile is.
+  Process {
+    id: saveProc
+    property string payload: ""
+    running: false
+    stdinEnabled: true
+    command: [root.pluginDir + "/scribe", "profiles", "save"]
+    onStarted: {
+      write(saveProc.payload)
+      saveProc.payload = ""
+      stdinEnabled = false
+    }
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.promptsError = ""
+        root.adoptProfiles(stdout.text)
+      } else {
+        root.promptsError = Model.errorMessage(exitCode, stderr.text)
       }
     }
+  }
+
+  // profiles.json is still hand-editable, and "Open profiles.json" invites
+  // exactly that. Without this, an edit made while the panel is open would be
+  // overwritten by the next Save from a stale in-memory list.
+  FileView {
+    id: profilesFile
+    path: root.configDir + "/profiles.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: profilesProc.running = true
   }
 
   Process {
@@ -285,7 +597,15 @@ Panel {
   IpcHandler {
     target: root.ipcTarget
 
+    // What the keybind calls: ask which prompt, then correct.
     function correct(): void { root.correct() }
+
+    // The two paths that skip the picker. A script has no keyboard to answer
+    // with, so it says up front which prompt it means -- or takes the default.
+    function correctNow(): void { root.correctNow() }
+    function correctWith(profile: string): void { root.correctWith(profile) }
+    function correctCustom(instruction: string): void { root.correctCustom(instruction) }
+
     function cancel(): void { root.cancel() }
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -386,9 +706,355 @@ Panel {
       // Left click is the panel, because that is what a bar icon with a
       // popup means. Middle click runs a correction without opening
       // anything -- the mouse equivalent of the keybind.
-      if (buttonCode === Qt.MiddleButton) root.correct()
+      // Middle click still corrects outright. Someone reaching for the mouse
+      // has already accepted the default prompt; handing them a keyboard grid
+      // instead would be slower than what they had.
+      if (buttonCode === Qt.MiddleButton) root.correctNow()
       else if (buttonCode === Qt.RightButton) root.cancel()
       else root.toggle()
+    }
+  }
+
+  // --------------------------------------------------------------- picker
+
+  // A second layer surface rather than a second plugin entry point: adding
+  // "overlay" to the manifest's kinds would reroute summon/hide/toggle away
+  // from the bar widget (shell.qml's isBarWidgetPanelPlugin), and IpcHandler
+  // allows one handler per target, which Panel.qml already holds. The picker
+  // also needs commandFor(), the settings and the run state, all of which
+  // live here.
+  PanelWindow {
+    id: picker
+
+    visible: root.pickerOpen
+    // One surface, on the monitor being looked at. A bar instance exists per
+    // monitor and whichever one won the IPC registration opens the picker, so
+    // without this the overlay could appear on a screen nobody is facing.
+    screen: {
+      var wanted = Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name) : ""
+      var screens = Quickshell.screens || []
+      for (var i = 0; i < screens.length; i++)
+        if (String(screens[i].name) === wanted) return screens[i]
+      return null
+    }
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "likt0r-scribe-picker"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: root.pickerOpen ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+
+    readonly property int gap: Style.space(12)
+    readonly property int tileSize: Math.max(
+      Style.space(120),
+      Math.min(Style.space(200),
+               Math.floor((picker.width * 0.6 - (root.pickerColumns - 1) * picker.gap) / root.pickerColumns)))
+    // The block is centered on screen; the rows inside it are not centered on
+    // each other. Pinning the width here is what lets the heading and the hint
+    // share the grid's left edge instead of widening the block and pushing the
+    // tiles off-centre.
+    readonly property int gridWidth:
+      root.pickerColumns * tileSize + (root.pickerColumns - 1) * gap
+
+    Rectangle {
+      anchors.fill: parent
+      // How much of the desktop shows through: turn the 0.85 down to reveal
+      // more of it. Stated here rather than taken from Color.menu.scrim,
+      // which a theme may set to fully transparent -- and an undimmed picker
+      // leaves its own heading and hint unreadable on whatever is behind.
+      //
+      // The alpha is a literal on purpose. Bound to a property of this window
+      // it evaluated as 0 before the initializer ran, and an alpha of 0 is a
+      // scrim that silently is not there.
+      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.85)
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      onClicked: root.closePicker()
+    }
+
+    Item {
+      id: pickerKeys
+      anchors.fill: parent
+      focus: true
+
+      // Handled explicitly rather than through PanelKeyCatcher: that one binds
+      // Space to activate and `x` to delete, and a stray Space that fires an
+      // LLM call is a misfire this surface cannot afford.
+      // In compose mode every key belongs to the text box, including the
+      // letters that steer the grid -- otherwise typing "hallo" walks the
+      // cursor instead of writing.
+      Keys.onEscapePressed: root.closePicker()
+      Keys.onLeftPressed: root.movePicker(-1, 0)
+      Keys.onRightPressed: root.movePicker(1, 0)
+      Keys.onUpPressed: root.movePicker(0, -1)
+      Keys.onDownPressed: root.movePicker(0, 1)
+      Keys.onTabPressed: root.movePicker(1, 0)
+      Keys.onBacktabPressed: root.movePicker(-1, 0)
+      Keys.onReturnPressed: root.activatePicker()
+      Keys.onEnterPressed: root.activatePicker()
+      Keys.onPressed: function(event) {
+        // The digits on the tiles are the point of the digits on the tiles.
+        if (event.text >= "1" && event.text <= "9") {
+          var wanted = event.text.charCodeAt(0) - 49
+          if (wanted < root.pickerCount) {
+            root.pickerIndex = wanted
+            root.activatePicker()
+          }
+          event.accepted = true
+        } else if ("hjkl".indexOf(event.text) >= 0 && event.text !== "") {
+          root.movePicker(event.text === "l" ? 1 : event.text === "h" ? -1 : 0,
+                          event.text === "j" ? 1 : event.text === "k" ? -1 : 0)
+          event.accepted = true
+        }
+      }
+
+      Column {
+        anchors.centerIn: parent
+        width: picker.gridWidth
+        spacing: Style.space(16)
+        visible: root.pickerMode === "grid"
+
+        Text {
+          width: parent.width
+          text: "Correct with"
+          color: Color.menu.text
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+        }
+
+        // Rows of tiles rather than a GridView, for the index-to-cell mapping
+        // Model.moveIndex navigates: n is a dozen at most, so there is nothing
+        // to virtualise. Rows start at x = 0, so a short last row sits under
+        // the first columns rather than floating between them.
+        Column {
+          spacing: picker.gap
+
+          Repeater {
+            model: Math.ceil(root.pickerCount / root.pickerColumns)
+
+            Row {
+              id: tileRow
+              required property int index
+              spacing: picker.gap
+
+              Repeater {
+                model: Math.min(root.pickerColumns,
+                                root.pickerCount - tileRow.index * root.pickerColumns)
+
+                BorderSurface {
+                  id: tile
+                  required property int index
+
+                  readonly property int slot: tileRow.index * root.pickerColumns + tile.index
+                  readonly property var entry: root.profiles[tile.slot] || null
+                  readonly property bool chosen: tile.slot === root.pickerIndex
+                  // The last tile is not a profile: it is never in
+                  // profiles.json, never in the Prompts tab, and the
+                  // normalizer never sees it. It is made up here, at render
+                  // time, and it opens a text box instead of running.
+                  readonly property bool custom: tile.slot === root.profiles.length
+
+                  width: picker.tileSize
+                  height: picker.tileSize
+                  radius: Style.cornerRadius
+                  // Opaque, like the first-party menu cards. The usual panel
+                  // fills are a 4% tint and menu.selectedBackground an 8% one,
+                  // which over a half-transparent scrim leaves the tile as
+                  // wallpaper with text on it -- unreadable over anything busy.
+                  color: Color.menu.background
+                  // Border.controlSpec("selected", ...) is not usable here:
+                  // selected-border-width defaults to 0, so the chosen tile
+                  // would carry no frame at all and the only cue left would be
+                  // the title colour. An explicit accent ring, the way the
+                  // overview marks its selection.
+                  borderSpec: tile.chosen
+                    ? Border.flat(Color.accent, Style.space(2))
+                    : Border.flat(Util.alpha(Color.menu.text, 0.18), Style.spacing.hairline)
+
+                  // The selection tint is composited onto the solid card
+                  // rather than replacing it, so it stays a highlight instead
+                  // of punching a hole back through to the desktop.
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: parent.radius
+                    color: Color.menu.selectedBackground
+                    opacity: tile.chosen ? 1.0 : 0.0
+                    Behavior on opacity { NumberAnimation { duration: 120 } }
+                  }
+
+                  // The number is not decoration: it names the key that picks
+                  // this tile outright.
+                  Text {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(10)
+                    visible: tile.slot < 9
+                    text: String(tile.slot + 1)
+                    color: tile.chosen ? Color.menu.selectedText : Util.alpha(Color.menu.text, 0.55)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  // Which prompt the keybind would have used on its own. Never
+                  // the custom tile: it is not something you can default to.
+                  Text {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(10)
+                    visible: tile.entry !== null && tile.entry.name === root.profile
+                    text: "●"
+                    color: tile.chosen ? Color.menu.selectedText : root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  Column {
+                    anchors.centerIn: parent
+                    width: parent.width - Style.space(20)
+                    spacing: Style.space(4)
+
+                    Text {
+                      width: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      text: tile.custom ? "✎" : ""
+                      visible: tile.custom
+                      color: tile.chosen ? Color.menu.selectedText : Color.menu.text
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.display
+                    }
+
+                    Text {
+                      width: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      text: tile.custom ? "Custom…"
+                        : (tile.entry ? (tile.entry.title || tile.entry.name) : "")
+                      color: tile.chosen ? Color.menu.selectedText : Color.menu.text
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.heading
+                      wrapMode: Text.WordWrap
+                      maximumLineCount: 3
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      width: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      visible: tile.custom
+                      text: "Type an instruction"
+                      color: Util.alpha(Color.menu.text, 0.55)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    // Movement, not mere presence. The overlay maps under
+                    // wherever the pointer happens to be resting, and onEntered
+                    // would fire there immediately -- throwing away the
+                    // preselected default before the user has touched anything.
+                    onPositionChanged: root.pickerIndex = tile.slot
+                    onClicked: root.activatePicker()
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        Text {
+          width: parent.width
+          text: "↑↓←→ choose · 1-9 pick · Enter correct · Esc cancel"
+          // Sits on the scrim, not on a card, so it takes its colour from the
+          // menu text rather than the panel's dim -- which is tuned for a
+          // solid panel background and disappears here.
+          color: Util.alpha(Color.menu.text, 0.65)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+      }
+
+      // Compose: the grid is replaced, not covered, and the block keeps the
+      // grid's width so it does not jump when the mode changes.
+      Column {
+        anchors.centerIn: parent
+        width: picker.gridWidth
+        spacing: Style.space(16)
+        visible: root.pickerMode === "compose"
+
+        Text {
+          width: parent.width
+          text: "Custom prompt"
+          color: Color.menu.text
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+        }
+
+        BorderSurface {
+          width: parent.width
+          height: Style.space(120)
+          radius: Style.cornerRadius
+          color: Color.menu.background
+          borderSpec: Border.flat(Color.accent, Style.space(2))
+
+          Flickable {
+            anchors.fill: parent
+            anchors.margins: Style.spacing.controlPaddingY
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            TextArea.flickable: TextArea {
+              id: instructionArea
+              wrapMode: TextArea.Wrap
+              placeholderText: "e.g. shorten this to one sentence"
+              placeholderTextColor: Util.alpha(Color.menu.text, 0.45)
+              color: Color.menu.text
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              selectionColor: Style.selectionFillFor(Color.menu.text, Color.accent, Color.urgent)
+              selectedTextColor: Color.menu.text
+              background: null
+
+              // Enter runs it; Shift+Enter is how you get a second line. A
+              // text box whose Enter inserts a newline would make the common
+              // case -- one short instruction -- cost a reach for the mouse.
+              Keys.onReturnPressed: function(event) {
+                if (event.modifiers & Qt.ShiftModifier) {
+                  event.accepted = false
+                } else {
+                  root.runCustom(instructionArea.text)
+                  event.accepted = true
+                }
+              }
+              Keys.onEnterPressed: function(event) {
+                if (event.modifiers & Qt.ShiftModifier) {
+                  event.accepted = false
+                } else {
+                  root.runCustom(instructionArea.text)
+                  event.accepted = true
+                }
+              }
+              // Escape steps back to the grid; a second one closes the picker.
+              Keys.onEscapePressed: function(event) {
+                root.closeCompose()
+                event.accepted = true
+              }
+            }
+          }
+        }
+
+        Text {
+          width: parent.width
+          text: "Enter correct · Shift+Enter new line · Esc back"
+          color: Util.alpha(Color.menu.text, 0.65)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+      }
     }
   }
 
@@ -407,12 +1073,26 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Every key typed into the prompt editor would otherwise run this
+      // panel's shortcuts first: Keys.priority is BeforeItem, so a `c` in the
+      // middle of a sentence would start a correction. This is what `blocked`
+      // is for.
+      blocked: titleField.activeFocus || systemArea.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      // PanelKeyCatcher swallows lowercase h/j/k/l as vim movement and returns
+      // before textKey ever fires, so the `h` shortcut below could never run
+      // on its own -- only Shift+H reached it. Left/right moving between the
+      // tabs is what the keys mean in a three-tab panel, and it makes plain
+      // `h` work the way the README always claimed.
+      onMoveRequested: function(dx, dy) {
+        if (dx !== 0) root.tabIndex = Math.max(0, Math.min(2, root.tabIndex + dx))
+      }
       onTextKey: function(t) {
         if (t === "c" || t === "C") root.correct()
-        else if (t === "h" || t === "H") root.tabIndex = 0
+        else if (t === "H") root.tabIndex = 0
         else if (t === "s" || t === "S") root.tabIndex = 1
+        else if (t === "p" || t === "P") root.tabIndex = 2
         else if (t === "d" || t === "D") { root.tabIndex = 1; doctorProc.running = true }
       }
 
@@ -457,11 +1137,13 @@ Panel {
 
           ButtonGroup {
             width: parent.width
-            options: [{ value: "history", label: "History" }, { value: "settings", label: "Settings" }]
-            value: root.tabIndex === 0 ? "history" : "settings"
+            options: [{ value: "history", label: "History" },
+                      { value: "prompts", label: "Prompts" },
+                      { value: "settings", label: "Settings" }]
+            value: root.tabValues[root.tabIndex]
             foreground: root.foreground
             fontFamily: root.fontFamily
-            onChanged: function(v) { root.tabIndex = v === "history" ? 0 : 1 }
+            onChanged: function(v) { root.tabIndex = Math.max(0, root.tabValues.indexOf(v)) }
           }
 
           PanelSeparator { foreground: root.foreground }
@@ -529,9 +1211,11 @@ Panel {
 
             Dropdown {
               width: parent.width
-              label: "Prompt profile"
+              label: "Default prompt"
               value: root.profile
-              options: root.profileNames
+              // {value, label} pairs: the setting stores the name, the user
+              // reads the title. Dropdown handles either shape.
+              options: root.profileOptions
               foreground: root.foreground
               fontFamily: root.fontFamily
               onChanged: function(v) { root.updateSetting("profile", v) }
@@ -678,13 +1362,6 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: doctorProc.running = true
               }
-
-              Button {
-                text: "Edit profiles"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: editProc.running = true
-              }
             }
 
             Text {
@@ -695,6 +1372,264 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WrapAnywhere
+            }
+          }
+
+          // ------------------------------------------------------ prompts
+
+          Column {
+            visible: root.tabIndex === 2
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "Prompts"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.profiles
+
+              CursorSurface {
+                id: promptRow
+                required property var modelData
+
+                width: parent.width
+                implicitHeight: promptText.implicitHeight + Style.spacing.rowPaddingX
+                // `current` is the kit's name for "this is the selected row";
+                // CursorSurface carries no click handling of its own, so the
+                // MouseArea below is the row's, exactly as HistoryRow does it.
+                current: promptRow.modelData.name === root.draftName
+                foreground: root.foreground
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.selectPrompt(promptRow.modelData.name)
+                }
+
+                Column {
+                  id: promptText
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(2)
+
+                  Row {
+                    spacing: Style.space(6)
+
+                    Text {
+                      text: promptRow.modelData.title || promptRow.modelData.name
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Text {
+                      visible: promptRow.modelData.name === root.profile
+                      text: "default"
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  Text {
+                    width: promptText.width
+                    text: Model.summarize(promptRow.modelData.system, 52)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                text: "New"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.newPrompt()
+              }
+
+              Button {
+                text: "Make default"
+                // Button inherits enabled down to its MouseArea, so this stops
+                // the click; the opacity is what makes that visible.
+                enabled: root.draftName !== "" && root.draftName !== root.profile && !root.draftIsNew
+                opacity: enabled ? 1.0 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.updateSetting("profile", root.draftName)
+              }
+
+              Button {
+                // The CLI refuses an empty profiles.json anyway; disabling the
+                // button is how that refusal stays out of the user's way.
+                text: "Delete"
+                enabled: root.profiles.length > 1 && root.draftProfile !== null
+                opacity: enabled ? 1.0 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: confirmDelete.opened = true
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground }
+
+            Text {
+              visible: root.draftName === ""
+              width: parent.width
+              text: "Pick a prompt to edit it."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            PanelSectionHeader {
+              visible: root.draftName !== ""
+              width: parent.width
+              text: "Title"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            TextField {
+              id: titleField
+              visible: root.draftName !== ""
+              width: parent.width
+              placeholderText: "What the tile says"
+              foreground: root.foreground
+              onTextEdited: root.draftTitle = text
+              // Escape leaves the field rather than dying here: with the key
+              // catcher blocked it would otherwise reach a field that ignores
+              // it, and the panel could no longer be closed from the keyboard.
+              Keys.onEscapePressed: function(event) {
+                keyCatcher.forceActiveFocus()
+                event.accepted = true
+              }
+            }
+
+            PanelSectionHeader {
+              visible: root.draftName !== ""
+              width: parent.width
+              text: "Prompt"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            // qs.Ui has no multi-line field, so this is a raw TextArea wearing
+            // the kit's clothes -- same fill, border and insets as Ui/TextField.
+            Flickable {
+              visible: root.draftName !== ""
+              width: parent.width
+              height: Style.space(150)
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+              TextArea.flickable: TextArea {
+                id: systemArea
+                wrapMode: TextArea.Wrap
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                selectionColor: Style.selectionFillFor(root.foreground, root.accent, root.urgent)
+                selectedTextColor: root.foreground
+                padding: Style.spacing.controlPaddingY
+                leftPadding: Style.spacing.controlPaddingX
+                rightPadding: Style.spacing.controlPaddingX
+                onTextChanged: root.draftSystem = text
+
+                background: BorderSurface {
+                  radius: Style.cornerRadius
+                  color: Style.controlFill(systemArea.activeFocus, systemArea.hovered,
+                                           root.foreground, root.accent)
+                  borderSpec: Border.controlSpec(systemArea.activeFocus ? "focus" : "normal",
+                                                 root.foreground, root.accent, root.urgent)
+                }
+
+                Keys.onEscapePressed: function(event) {
+                  keyCatcher.forceActiveFocus()
+                  event.accepted = true
+                }
+              }
+            }
+
+            // A prompt without these two rules still saves -- the file is the
+            // user's -- but the selection stops being quarantined as data, and
+            // that is worth saying out loud rather than discovering later.
+            Text {
+              visible: root.draftName !== "" && !root.draftGuarded
+              width: parent.width
+              text: "Without <text> and \"nothing else\", this prompt drops the injection guard."
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              visible: root.promptsError !== ""
+              width: parent.width
+              text: root.promptsError
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              visible: root.draftName !== ""
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                text: "Save"
+                enabled: root.promptsDirty
+                opacity: enabled ? 1.0 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.savePrompts()
+              }
+
+              Button {
+                text: "Revert"
+                enabled: root.promptsDirty && !root.draftIsNew
+                opacity: enabled ? 1.0 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.selectPrompt(root.draftName)
+              }
+
+              Text {
+                visible: root.promptsDirty
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Unsaved"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground }
+
+            Button {
+              text: "Open profiles.json"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: editProc.running = true
             }
           }
         }
@@ -709,6 +1644,17 @@ Panel {
       foreground: root.foreground
       fontFamily: root.fontFamily
       onConfirmed: { clearProc.running = true; opened = false }
+      onCanceled: opened = false
+    }
+
+    ConfirmDialog {
+      id: confirmDelete
+      anchors.fill: parent
+      message: "Delete the prompt “" + root.draftTitle + "”?"
+      confirmText: "Delete"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onConfirmed: { root.deletePrompt(root.draftName); opened = false }
       onCanceled: opened = false
     }
   }

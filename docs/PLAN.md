@@ -135,14 +135,87 @@ does not run in CI.
 
 ## Prompt profiles
 
-Shipped in `profiles.default.json`, copied to `~/.config/omarchy/scribe/profiles.json`
+Shipped as `BUILTIN_PROFILES` in `scribe` (this plan said `profiles.default.json`;
+a separate file never happened), copied to `~/.config/omarchy/scribe/profiles.json`
 on first run and then owned by the user. `FileView { watchChanges: true }` in the
 panel picks up hand edits without a restart, the same way the calendar plugin
 watches its exported events.
 
 Defaults: **Grammar** (the prompt above), **Grammar + style** (also tightens
-wording), **Formal** (raises register). The panel lists them, marks the active
-one, and has an "Edit profiles…" button that opens the JSON in `$EDITOR`.
+wording), **Formal** (raises register). The Prompts tab lists them, marks the
+default, and edits them in place; "Open profiles.json" hands the file to
+`xdg-open` (this plan said `$EDITOR`).
+
+### Titles, and why `name` is not one
+
+Each profile carries a `name` and a `title`. The title is what the picker tile
+and the dropdown show, and the user renames it freely. The name is the identity:
+`--profile` takes it, `shell.json` stores it, every history entry records it. The
+two were one field until the Prompts tab made titles editable, at which point a
+rename would have sent `resolve_profile` down its `profiles[0]` fallback and
+quietly corrected with a different prompt than the one on screen. Splitting them
+costs one field and a one-time upgrade that adds `title = name`, leaves every
+name alone, and keeps the original bytes in `profiles.json.bak`.
+
+## The picker
+
+The keybind opens a full-screen layer surface with the prompts as tiles, rather
+than correcting with whatever the settings last said. Decisions worth recording:
+
+- **It lives in `Panel.qml`, not a second entry point.** Adding `overlay` to the
+  manifest's `kinds` would reroute `summon`/`hide`/`toggle` away from the bar
+  widget, and `IpcHandler` allows one handler per target, which the panel holds.
+  The picker also needs `commandFor()`, the settings and the run state.
+- **Columns are `ceil(sqrt(n))`**, and each row centers itself, so a ragged last
+  row sits under the middle of the grid rather than hanging off the left.
+- **Movement clamps, never wraps.** A held arrow key stopping at the edge beats
+  the cursor reappearing somewhere the eye did not follow.
+- **Keys are handled explicitly, not through `PanelKeyCatcher`.** That component
+  binds Space to activate and `x` to delete; on a surface where activate means
+  "call an LLM", a stray Space is a misfire.
+- **The surface closes before the run starts.** An exclusive layer surface
+  swallows what the compositor is asked to do underneath it, and a notification
+  raised behind a full-screen overlay is one nobody sees.
+- **Picking persists as the new default**, so "keybind, Enter" keeps repeating
+  the last choice. `updateEntryInline` diffs before writing, so re-picking the
+  same prompt touches nothing.
+- **`cancel` dismisses the picker.** An overlay holding exclusive keyboard focus
+  needs a way out that does not depend on its own key handling.
+- **The short last row is left-aligned**, under the first columns, while the
+  block as a whole is centered on screen. Pinning the block to the grid's width
+  is what keeps the heading and the hint from widening it and pushing the tiles
+  off-centre.
+
+### The custom tile
+
+One tile past the prompts opens a text box for a one-off instruction. The
+decision that matters: **the typed text is a value inside a frame, never the
+frame itself.** `compose_custom()` in `scribe` puts it into a template that
+carries the same four rules every shipped prompt does, and the contract test
+runs its invariant loops over `custom_profile("shorten it")` alongside the
+built-ins. Handing the typed words to the adapter as the system prompt would
+drop all four at once: "mach es kürzer" earns a "Gerne! Hier ist..." on the
+clipboard, and the selection stops being quarantined as data on a path that
+still reads untrusted marked-up text.
+
+Consequences worth recording:
+
+- `--instruction` beats `--profile` rather than merging. Two sets of rules in
+  one system prompt is a way to find out which the model prefers, not a way to
+  decide.
+- The instruction is recorded in the history entry, but only alongside the
+  text: it is something the user wrote, so `--history-metadata-only` drops it
+  with everything else quotable.
+- It is remembered for the next open in memory only. Persisting it would mean
+  a new manifest key -- defaults, schema and a literal `setting()` read, all
+  three gated by `run-tests.sh` -- for a string nobody asked to keep across a
+  shell restart.
+- The instruction travels in argv, like `--profile` and `--model`, so it is
+  visible in `/proc` to the user's own processes for the length of the call.
+- Known limit: on `qwen3.8:27b`, an instruction written in another language
+  than the text pulls the answer into the instruction's language, despite the
+  template asking for the text's own to be kept. Tightening the wording did not
+  move it; it is a model behaviour, and the README says so.
 
 ## Settings
 
