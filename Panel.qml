@@ -545,6 +545,47 @@ Panel {
       if (items[i] && typeof items[i].succeed === "function") items[i].succeed(result)
   }
 
+  // Not broadcastFailure: "fail" only moves the machine out of WORKING, and
+  // this is found while idle -- at startup, or when the watcher sees the file
+  // change. It still has to turn the icon red.
+  function broadcastMisconfigured(code, message) {
+    var items = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets(moduleName) : [root]
+    for (var i = 0; i < items.length; i++)
+      if (items[i] && typeof items[i].misconfigured === "function") items[i].misconfigured(code, message)
+  }
+
+  function broadcastRecovered() {
+    var items = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets(moduleName) : [root]
+    for (var i = 0; i < items.length; i++)
+      if (items[i] && typeof items[i].recovered === "function") items[i].recovered()
+  }
+
+  // Remembered so recovery can undo exactly this and nothing else. A run that
+  // failed upstream must keep its message when the prompts happen to reload.
+  property bool configFailed: false
+
+  function misconfigured(code, message) {
+    configFailed = true
+    lastExitCode = code
+    lastError = message
+    promptsError = message
+    apply("misconfigure")
+  }
+
+  // The config error outlived its cause otherwise: nothing cleared lastError
+  // but a successful correction, so a profiles.json that had been fixed kept
+  // showing the complaint about the version before it.
+  function recovered() {
+    if (!configFailed) return
+    configFailed = false
+    lastExitCode = 0
+    lastError = ""
+    promptsError = ""
+    apply("acknowledge")
+  }
+
   function broadcastFailure(code, stderr) {
     var items = bar && typeof bar.moduleWidgets === "function"
       ? bar.moduleWidgets(moduleName) : [root]
@@ -573,6 +614,18 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.adoptProfiles(text)
+    }
+    stderr: StdioCollector { waitForEnd: true }
+    // A profiles.json the CLI refuses used to leave this list empty, which
+    // meant the keybind opened nothing at all and said nothing about why.
+    // The prompts are the product; failing to read them is worth the red icon.
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.broadcastRecovered()
+        return
+      }
+      root.pickerWanted = false
+      root.broadcastMisconfigured(exitCode, Model.plainError(stderr.text))
     }
   }
 

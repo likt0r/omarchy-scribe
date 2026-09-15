@@ -213,6 +213,31 @@ regeneration that produced nothing should fail in the suite, not in the UI.
 The field has no fallback, unlike `title`: a prompt without an icon shows its
 title alone, which is what every tile looked like before icons existed.
 
+### No silent substitution
+
+`resolve_profile` used to fall through to `profiles[0]` when a name did not
+match, on the theory that a correction with the wrong prompt beats no
+correction. It does not. A translation prompt whose name no longer matched
+resolved to the spelling prompt, the text came back unchanged, and telling that
+apart from "the model had an off day" took an afternoon and a 12-run sample.
+
+So an unresolved name raises `EXIT_CONFIG` and lists what is available, and a
+`profiles.json` that exists but cannot be parsed or holds no usable entry does
+the same. A *missing* file is still first run and still gets the built-ins.
+
+Two things had to follow, or the silence would just have moved:
+
+- `cmd_doctor` catches it and prints a MISSING line. Doctor is the command you
+  reach for when something is broken; it cannot be the thing that breaks.
+- The panel's `profilesProc` now has an exit handler. An empty prompt list used
+  to mean the keybind opened nothing and said nothing. It reports through a new
+  `misconfigure` state event, which -- unlike `fail` -- reaches ERROR from any
+  state, because this is found while idle rather than as the outcome of a run.
+
+`Model.plainError()` exists for the same reason: `errorMessage`'s headline is
+for exit codes that arrive without words, and "Backend is not configured." in
+front of "profiles.json is not valid JSON" only misdirects.
+
 ### Confirmation dialogs need routing
 
 `Ui.ConfirmDialog` carries no `Keys` handling of its own: it exposes

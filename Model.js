@@ -51,6 +51,12 @@ function nextState(current, event) {
     case "acknowledge":
       // Opening the panel clears a sticky error -- the user has now seen it.
       return current === STATE_ERROR ? STATE_IDLE : current
+    case "misconfigure":
+      // Unlike "fail", this is allowed from any state. It is not the outcome
+      // of a run; it is the discovery that no run can happen -- an unreadable
+      // profiles.json, found while idle -- and that has to reach the icon
+      // rather than wait for someone to open the panel.
+      return STATE_ERROR
     case "cancel":
       return current === STATE_WORKING ? STATE_IDLE : current
     default:
@@ -202,15 +208,16 @@ function moveIndex(index, dx, dy, count, columns) {
   return current
 }
 
-// Falls through to the first profile rather than erroring: a correction that
-// runs with the wrong prompt is recoverable, one that refuses to run because
-// a profile was renamed is just an obstacle.
+// Returns nothing for a name that is not there, rather than the first
+// profile. Kept in step with resolve_profile() in `scribe`, which raises: a
+// correction that silently ran with the wrong prompt is a wrong answer wearing
+// the face of a right one.
 function resolveProfile(profiles, wanted) {
   var list = profiles || []
   for (var i = 0; i < list.length; i++) {
     if (list[i].name === wanted) return list[i]
   }
-  return list.length > 0 ? list[0] : null
+  return null
 }
 
 // ---- Icons.
@@ -344,6 +351,16 @@ function formatUsage(usage) {
 // the specifics the CLI knows and the widget cannot guess (which key is
 // missing, what the API said). Both are shown -- the sentence tells the user
 // what kind of problem it is, the detail tells them which one.
+// The stderr line on its own, for failures whose message already names both
+// the problem and the fix. errorMessage's headline exists for exit codes that
+// arrive without words ("Backend is not configured."); pasting it in front of
+// "profiles.json is not valid JSON" only misdirects.
+function plainError(stderr) {
+  var lines = String(stderr === undefined || stderr === null ? "" : stderr)
+    .split("\n").filter(function (l) { return l.trim() !== "" })
+  return lines.length > 0 ? lines[lines.length - 1].trim() : ""
+}
+
 function errorMessage(exitCode, stderr) {
   var detail = String(stderr === undefined || stderr === null ? "" : stderr).trim()
   detail = detail.split("\n").filter(function (l) { return l.trim() !== "" }).pop() || ""
@@ -409,6 +426,7 @@ if (typeof module !== "undefined") {
     formatDuration: formatDuration,
     formatUsage: formatUsage,
     errorMessage: errorMessage,
+    plainError: plainError,
     errorHeadline: errorHeadline
   }
 }

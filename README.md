@@ -68,11 +68,11 @@ corrects, Escape walks away.
 | **`c` in the panel** | open the picker |
 | **`h` / `p` / `s`** | history / prompts / settings tab |
 | **`←` / `→` in the panel** | move between the tabs |
+| **`d`** | run the setup check |
 
 In the Prompts tab the list is keyboard-driven too: `↑` / `↓` select a prompt,
 `n` starts a new one, `i` picks its icon, and `x` deletes it — the same
 question the Delete button asks, answered with `←` `→` and Enter.
-| **`d`** | run the setup check |
 
 The tile the keybind would have used on its own carries a dot, and the picker
 opens with it selected — so "keybind, Enter" stays the one-handed path it was.
@@ -144,6 +144,14 @@ meets a file written before titles existed, to add them. That upgrade leaves
 every name and prompt exactly as it found them and keeps the original bytes in
 `profiles.json.bak`. Hand edits are still welcome — "Open profiles.json" in the
 Prompts tab opens the file, and the panel reloads when it changes on disk.
+
+If `--profile` names something that is not there, or `profiles.json` cannot be
+read, Scribe says so and stops — it does not quietly correct with a different
+prompt. The message names the available prompts. This is worth knowing because
+the failure it replaces was hard to see: a translation prompt that resolved to
+the spelling one came back unchanged and looked like the model having an off
+day. `scribe doctor` still reports, so it remains useful exactly when the file
+is broken.
 
 Every profile carries the same two rules, and both are load-bearing. "Reply
 with the corrected text and nothing else" is what makes the output pasteable

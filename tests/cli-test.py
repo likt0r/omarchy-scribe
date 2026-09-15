@@ -156,9 +156,24 @@ class ScribeTest(unittest.TestCase):
         sent = json.loads(json.loads(result.stdout)["corrected"])
         self.assertIn("formal", sent["system"].lower())
 
-    def test_unknown_profile_falls_back_rather_than_failing(self):
+    def test_an_unknown_profile_is_an_error_not_a_substitution(self):
+        """The silence this replaces cost real time to diagnose.
+
+        A translation prompt whose name no longer matched used to resolve to
+        the spelling prompt, so the text came back unchanged and looked like
+        the model having an off day rather than a misconfiguration.
+        """
         result = self.correct("x", "--backend", "reflect", "--profile", "Deleted")
-        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertEqual(result.returncode, EXIT_CONFIG, result.stdout)
+        self.assertIn("Deleted", result.stderr)
+        # The message has to name the way out, not just the problem.
+        self.assertIn("Grammar", result.stderr)
+
+    def test_the_error_names_every_available_prompt(self):
+        result = self.run_scribe("run", "--stdin", "--backend", "reflect",
+                                 "--profile", "nope", stdin="x")
+        for name in ("Grammar", "Grammar + style", "Formal"):
+            self.assertIn(name, result.stderr)
 
     def test_profiles_are_seeded_on_first_run(self):
         path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
@@ -299,15 +314,25 @@ class ScribeTest(unittest.TestCase):
         self.assertEqual(result.returncode, EXIT_USAGE)
         self.assertIn("stdin", result.stderr)
 
-    def test_corrupt_profiles_fall_back_to_the_builtins(self):
-        """A half-saved profiles.json must not block a correction."""
+    def test_corrupt_profiles_are_reported_not_papered_over(self):
+        """Falling back to the built-ins would correct with prompts nobody chose."""
         path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("{ this is not json")
         result = self.run_scribe("profiles")
-        self.assertEqual(result.returncode, EXIT_OK)
-        self.assertIn("Grammar", result.stdout)
+        self.assertEqual(result.returncode, EXIT_CONFIG)
+        self.assertIn("not valid JSON", result.stderr)
+        self.assertIn(path, result.stderr)
+
+    def test_a_profiles_file_with_no_usable_entry_is_reported(self):
+        path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"profiles": [{"name": "", "system": ""}]}, handle)
+        result = self.run_scribe("profiles")
+        self.assertEqual(result.returncode, EXIT_CONFIG)
+        self.assertIn("No usable prompt", result.stderr)
 
     # ----------------------------------------------------- custom instruction
 

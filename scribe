@@ -241,10 +241,10 @@ def needs_title(raw):
 def load_profiles():
     """Read the user's profiles, seeding them from the built-ins on first run.
 
-    A profiles.json that is corrupt or hand-edited into nonsense falls back to
-    the built-ins rather than refusing to run: the user wants their text
-    corrected, and a broken prompt file is something the panel can complain
-    about afterwards.
+    A file that is absent is first run, and gets the built-ins. A file that is
+    present but unreadable or unusable is a problem the user needs told about,
+    so it raises rather than quietly correcting with prompts they did not
+    choose -- see resolve_profile for why silence is the worse failure.
     """
     path = profiles_path()
     if not os.path.exists(path):
@@ -257,12 +257,15 @@ def load_profiles():
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
-    except (OSError, ValueError):
-        return normalize_profiles(BUILTIN_PROFILES)
+    except OSError as exc:
+        raise ScribeError(EXIT_CONFIG, "Could not read %s: %s" % (path, exc))
+    except ValueError as exc:
+        raise ScribeError(EXIT_CONFIG, "%s is not valid JSON: %s" % (path, exc))
 
     profiles = normalize_profiles(raw)
     if not profiles:
-        return normalize_profiles(BUILTIN_PROFILES)
+        raise ScribeError(EXIT_CONFIG,
+                          "No usable prompt in %s: every entry needs a name and a prompt." % path)
 
     # One-time upgrade for a file written before titles existed. The `name`
     # values are left exactly as they are: they are what shell.json and the
@@ -305,10 +308,19 @@ def normalize_profiles(raw):
 
 
 def resolve_profile(profiles, wanted):
+    """Find a profile by name, or say so.
+
+    This used to fall through to profiles[0] on the theory that a correction
+    with the wrong prompt beats no correction at all. It does not: the wrong
+    prompt is a silent wrong answer. A translation prompt that quietly resolved
+    to the spelling one came back unchanged and looked like the model having a
+    bad day, which cost an afternoon to tell apart from a real bug.
+    """
     for profile in profiles:
         if profile["name"] == wanted:
             return profile
-    return profiles[0] if profiles else None
+    raise ScribeError(EXIT_CONFIG, "No prompt named %r. Available: %s." % (
+        wanted, ", ".join(p["name"] for p in profiles) or "none"))
 
 
 # ------------------------------------------------------------------ adapters
@@ -533,10 +545,7 @@ def cmd_run(args):
     if getattr(args, "instruction", ""):
         profile = custom_profile(args.instruction)
     else:
-        profiles = load_profiles()
-        profile = resolve_profile(profiles, args.profile)
-        if profile is None:
-            raise ScribeError(EXIT_CONFIG, "No usable prompt profile in %s." % profiles_path())
+        profile = resolve_profile(load_profiles(), args.profile)
 
     if args.stdin:
         original = sys.stdin.read()
@@ -734,8 +743,16 @@ def cmd_doctor(args):
         problems += 1
         adapter = None
 
-    profiles = load_profiles()
-    print("ok       profiles     %s (%s)" % (", ".join(p["name"] for p in profiles), profiles_path()))
+    # doctor is the command you reach for when something is wrong, so a broken
+    # profiles.json has to be a line in its report rather than the reason it
+    # cannot produce one.
+    try:
+        profiles = load_profiles()
+        print("ok       profiles     %s (%s)"
+              % (", ".join(p["name"] for p in profiles), profiles_path()))
+    except ScribeError as exc:
+        print("MISSING  profiles     %s" % exc.message)
+        problems += 1
 
     if adapter:
         try:

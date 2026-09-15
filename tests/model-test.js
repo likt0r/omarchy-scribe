@@ -47,6 +47,17 @@ check('settle does not interrupt working', Model.nextState(WORKING, 'settle'), W
 
 check('acknowledge clears error', Model.nextState(ERROR, 'acknowledge'), IDLE)
 check('acknowledge leaves working alone', Model.nextState(WORKING, 'acknowledge'), WORKING)
+// A broken config is not the outcome of a run, so it must reach the error
+// state from anywhere -- including idle, which is where it is usually found.
+check('misconfigure errors from idle', Model.nextState(IDLE, 'misconfigure'), ERROR)
+check('misconfigure errors from working', Model.nextState(WORKING, 'misconfigure'), ERROR)
+check('misconfigure errors from done', Model.nextState(DONE, 'misconfigure'), ERROR)
+
+check('a plain error is the last stderr line',
+  Model.plainError("warning: x\nprofiles.json is not valid JSON\n"), 'profiles.json is not valid JSON')
+check('a plain error of nothing is empty', Model.plainError(''), '')
+check('a plain error copes with null', Model.plainError(null), '')
+
 check('cancel stops working', Model.nextState(WORKING, 'cancel'), IDLE)
 check('cancel on idle is a no-op', Model.nextState(IDLE, 'cancel'), IDLE)
 check('unknown event changes nothing', Model.nextState(WORKING, 'wat'), WORKING)
@@ -111,10 +122,11 @@ check('a blank title falls back to the name',
 
 const profiles = Model.normalizeProfiles(rawProfiles)
 check('the named profile wins', Model.resolveProfile(profiles, 'Formal').system, 'be formal')
-// A renamed profile must not block a correction: running with the wrong
-// prompt is recoverable, refusing to run is just an obstacle.
-check('an unknown name falls back to the first',
-  Model.resolveProfile(profiles, 'Deleted').name, 'Grammar')
+// No fallback: a correction that ran with a prompt the user did not choose is
+// a wrong answer that looks like a right one, and it cost an afternoon to tell
+// apart from a real bug once already.
+check('an unknown name resolves to nothing',
+  Model.resolveProfile(profiles, 'Deleted'), null)
 check('no profiles resolves to null', Model.resolveProfile([], 'Grammar'), null)
 
 // ---- Icons. Optional, and with no fallback: a prompt without one shows its
