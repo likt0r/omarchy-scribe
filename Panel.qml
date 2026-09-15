@@ -309,6 +309,7 @@ Panel {
   // paragraph someone just wrote.
   property string draftName: ""
   property string draftTitle: ""
+  property string draftIcon: ""
   property string draftSystem: ""
   property string promptsError: ""
 
@@ -323,6 +324,7 @@ Panel {
   readonly property bool promptsDirty: draftName !== ""
     && (draftIsNew
         || draftTitle !== draftProfile.title
+        || draftIcon !== draftProfile.icon
         || draftSystem !== draftProfile.system)
 
   // The two rules every shipped prompt carries. A hand-written prompt that
@@ -336,15 +338,16 @@ Panel {
     var found = null
     for (var i = 0; i < profiles.length; i++)
       if (profiles[i].name === name) found = profiles[i]
-    loadDraft(found ? found.title : "", found ? found.system : "")
+    loadDraft(found ? found.title : "", found ? found.icon : "", found ? found.system : "")
   }
 
   // The editors are written to rather than bound. A `text:` binding onto the
   // draft survives only until the first keystroke -- typing assigns text
   // imperatively and breaks it -- after which selecting another prompt would
   // leave the previous one's words on screen.
-  function loadDraft(title, system) {
+  function loadDraft(title, icon, system) {
     draftTitle = title
+    draftIcon = icon
     draftSystem = system
     promptsError = ""
     if (typeof titleField !== "undefined" && titleField) titleField.text = title
@@ -359,6 +362,17 @@ Panel {
       selectPrompt(profiles[0].name)
   }
 
+  // Moves the editor to the next prompt in the list. An unsaved draft for a
+  // prompt that is not in the list yet has nothing to step from, so it stays.
+  function stepPrompt(delta) {
+    if (profiles.length === 0 || draftIsNew) return
+    var at = -1
+    for (var i = 0; i < profiles.length; i++)
+      if (profiles[i].name === draftName) at = i
+    var next = Math.min(Math.max(at + delta, 0), profiles.length - 1)
+    if (next !== at) selectPrompt(profiles[next].name)
+  }
+
   function newPrompt() {
     // The name is generated once from the title and then frozen: it is what
     // shell.json and every history entry refer to, so a later rename of the
@@ -368,7 +382,7 @@ Panel {
     // Seeded from an existing prompt rather than blank, so a new one inherits
     // the two rules that keep the selection quarantined as data instead of
     // starting life without them.
-    loadDraft(title, profiles.length > 0 ? profiles[0].system : "")
+    loadDraft(title, "", profiles.length > 0 ? profiles[0].system : "")
     tabIndex = 2
   }
 
@@ -381,13 +395,13 @@ Panel {
     var replaced = false
     for (var i = 0; i < profiles.length; i++) {
       if (profiles[i].name === draftName) {
-        out.push({ name: draftName, title: draftTitle, system: draftSystem })
+        out.push({ name: draftName, title: draftTitle, icon: draftIcon, system: draftSystem })
         replaced = true
       } else {
         out.push(profiles[i])
       }
     }
-    if (!replaced) out.push({ name: draftName, title: draftTitle, system: draftSystem })
+    if (!replaced) out.push({ name: draftName, title: draftTitle, icon: draftIcon, system: draftSystem })
     writeProfiles(out)
   }
 
@@ -406,6 +420,55 @@ Panel {
     saveProc.running = true
   }
 
+  // ------------------------------------------------------------ icon picker
+
+  // [glyph, name] pairs generated from the font by tools/generate-icons.py.
+  // Loaded on first open rather than at startup: it is 300 KB that most
+  // sessions never look at.
+  property var icons: []
+  property bool iconPickerOpen: false
+  property string iconQuery: ""
+  property int iconIndex: 0
+
+  readonly property int iconColumns: 7
+
+  readonly property var iconMatches: Model.filterIcons(icons, iconQuery, 400)
+
+  function openIconPicker() {
+    iconQuery = ""
+    iconIndex = 0
+    iconPickerOpen = true
+    if (icons.length === 0) iconsFile.reload()
+    Qt.callLater(function() { iconSearch.forceActiveFocus() })
+  }
+
+  function closeIconPicker() {
+    iconPickerOpen = false
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function moveIconCursor(dx, dy) {
+    iconIndex = Model.moveIndex(iconIndex, dx, dy, iconMatches.length, iconColumns)
+  }
+
+  function pickIcon(glyph) {
+    draftIcon = glyph
+    closeIconPicker()
+  }
+
+  FileView {
+    id: iconsFile
+    path: root.pluginDir + "/icons.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        root.icons = parsed.icons || []
+      } catch (e) { root.icons = [] }
+    }
+    onLoadFailed: root.icons = []
+  }
+
   function updateSetting(key, value) {
     var entry = { id: moduleName }
     for (var k in settings) if (k !== "id") entry[k] = settings[k]
@@ -415,6 +478,21 @@ Panel {
     settings = entry
     if (bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
       bar.shell.updateEntryInline(moduleName, entry)
+  }
+
+  // ConfirmDialog carries no key handling of its own -- it exposes handleKey()
+  // and expects the panel to route into it, the way the first-party clipboard
+  // and menu panels do. Without this a confirmation can only be answered with
+  // the mouse: Escape does not dismiss it and Enter does not confirm it.
+  readonly property var openDialog:
+    confirmDelete.opened ? confirmDelete : (confirmClear.opened ? confirmClear : null)
+
+  function dialogCancel() { if (openDialog) openDialog.canceled() }
+  function dialogToggle() { if (openDialog) openDialog.selectedIndex = openDialog.selectedIndex === 0 ? 1 : 0 }
+  function dialogActivate() {
+    if (!openDialog) return
+    if (openDialog.selectedIndex === 0) openDialog.canceled()
+    else openDialog.confirmed()
   }
 
   function copyEntry(entry) {
@@ -915,11 +993,14 @@ Panel {
                     width: parent.width - Style.space(20)
                     spacing: Style.space(4)
 
+                    // One slot for both: the composer's glyph and whatever
+                    // icon a prompt was given. A prompt without one simply
+                    // shows its title, the way every tile looked before.
                     Text {
                       width: parent.width
                       horizontalAlignment: Text.AlignHCenter
-                      text: tile.custom ? "✎" : ""
-                      visible: tile.custom
+                      visible: tile.custom || (tile.entry !== null && Model.hasIcon(tile.entry))
+                      text: tile.custom ? "✎" : (tile.entry ? tile.entry.icon : "")
                       color: tile.chosen ? Color.menu.selectedText : Color.menu.text
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.display
@@ -1077,22 +1158,50 @@ Panel {
       // panel's shortcuts first: Keys.priority is BeforeItem, so a `c` in the
       // middle of a sentence would start a correction. This is what `blocked`
       // is for.
-      blocked: titleField.activeFocus || systemArea.activeFocus
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      blocked: titleField.activeFocus || systemArea.activeFocus || root.iconPickerOpen
+      // A dialog on top owns the keyboard until it is answered.
+      onCloseRequested: {
+        if (root.openDialog) root.dialogCancel()
+        else root.close()
+      }
+      onReturnRequested: if (root.openDialog) root.dialogActivate()
+      // `x` is what PanelKeyCatcher calls deletion everywhere else in the
+      // shell; on the Prompts tab it asks the same question the button does.
+      onDeleteRequested: {
+        if (!root.openDialog && root.tabIndex === 2 && root.draftProfile !== null
+            && root.profiles.length > 1)
+          confirmDelete.opened = true
+      }
+      onTabRequested: function(direction) {
+        if (root.openDialog) root.dialogToggle()
+        else root.switchPanel(direction)
+      }
       // PanelKeyCatcher swallows lowercase h/j/k/l as vim movement and returns
       // before textKey ever fires, so the `h` shortcut below could never run
       // on its own -- only Shift+H reached it. Left/right moving between the
       // tabs is what the keys mean in a three-tab panel, and it makes plain
       // `h` work the way the README always claimed.
       onMoveRequested: function(dx, dy) {
+        if (root.openDialog) {
+          if (dx !== 0) root.dialogToggle()
+          return
+        }
         if (dx !== 0) root.tabIndex = Math.max(0, Math.min(2, root.tabIndex + dx))
+        // Up and down walk the prompt list, which is otherwise reachable only
+        // with the mouse -- and the delete shortcut needs something selected.
+        else if (dy !== 0 && root.tabIndex === 2) root.stepPrompt(dy)
       }
       onTextKey: function(t) {
+        if (root.openDialog) return
         if (t === "c" || t === "C") root.correct()
         else if (t === "H") root.tabIndex = 0
         else if (t === "s" || t === "S") root.tabIndex = 1
         else if (t === "p" || t === "P") root.tabIndex = 2
+        else if ((t === "n" || t === "N") && root.tabIndex === 2) root.newPrompt()
+        // The rest of the panel is keyboard-driven; the icon picker would be
+        // the one corner reachable only by mouse without this.
+        else if ((t === "i" || t === "I") && root.tabIndex === 2 && root.draftName !== "")
+          root.openIconPicker()
         else if (t === "d" || t === "D") { root.tabIndex = 1; doctorProc.running = true }
       }
 
@@ -1358,6 +1467,7 @@ Panel {
 
               Button {
                 text: "Check setup"
+                bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: doctorProc.running = true
@@ -1424,6 +1534,14 @@ Panel {
                     spacing: Style.space(6)
 
                     Text {
+                      visible: Model.hasIcon(promptRow.modelData)
+                      text: promptRow.modelData.icon
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Text {
                       text: promptRow.modelData.title || promptRow.modelData.name
                       color: root.foreground
                       font.family: root.fontFamily
@@ -1455,15 +1573,22 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
+              // bordered, because Ui.Button defaults to bare text on a
+              // transparent ground: without a frame these read as labels
+              // rather than as the things that add and remove a prompt.
               Button {
                 text: "New"
+                iconText: "󰐕"
+                bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: root.newPrompt()
               }
 
               Button {
-                text: "Make default"
+                text: "Default"
+                iconText: "󰓎"
+                bordered: true
                 // Button inherits enabled down to its MouseArea, so this stops
                 // the click; the opacity is what makes that visible.
                 enabled: root.draftName !== "" && root.draftName !== root.profile && !root.draftIsNew
@@ -1477,6 +1602,8 @@ Panel {
                 // The CLI refuses an empty profiles.json anyway; disabling the
                 // button is how that refusal stays out of the user's way.
                 text: "Delete"
+                iconText: "󰩹"
+                bordered: true
                 enabled: root.profiles.length > 1 && root.draftProfile !== null
                 opacity: enabled ? 1.0 : 0.45
                 foreground: root.foreground
@@ -1518,6 +1645,64 @@ Panel {
               Keys.onEscapePressed: function(event) {
                 keyCatcher.forceActiveFocus()
                 event.accepted = true
+              }
+            }
+
+            PanelSectionHeader {
+              visible: root.draftName !== ""
+              width: parent.width
+              text: "Icon"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            // The picker itself is a modal over the whole panel: ten thousand
+            // glyphs do not fit under a label, and searching them needs a
+            // field of its own. This is only the current value and the way in.
+            Row {
+              visible: root.draftName !== ""
+              width: parent.width
+              spacing: Style.space(8)
+
+              CursorSurface {
+                width: Style.space(30)
+                height: Style.space(30)
+                current: root.draftIcon !== ""
+                foreground: root.foreground
+
+                Text {
+                  anchors.centerIn: parent
+                  text: root.draftIcon === "" ? "—" : root.draftIcon
+                  color: root.draftIcon === "" ? root.dim : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openIconPicker()
+                }
+              }
+
+              Button {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Choose…"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.openIconPicker()
+              }
+
+              Button {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Clear"
+                bordered: true
+                enabled: root.draftIcon !== ""
+                opacity: enabled ? 1.0 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.draftIcon = ""
               }
             }
 
@@ -1597,6 +1782,8 @@ Panel {
 
               Button {
                 text: "Save"
+                iconText: "󰆓"
+                bordered: true
                 enabled: root.promptsDirty
                 opacity: enabled ? 1.0 : 0.45
                 foreground: root.foreground
@@ -1606,6 +1793,8 @@ Panel {
 
               Button {
                 text: "Revert"
+                iconText: "󰕌"
+                bordered: true
                 enabled: root.promptsDirty && !root.draftIsNew
                 opacity: enabled ? 1.0 : 0.45
                 foreground: root.foreground
@@ -1627,6 +1816,7 @@ Panel {
 
             Button {
               text: "Open profiles.json"
+              bordered: true
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: editProc.running = true
@@ -1645,6 +1835,130 @@ Panel {
       fontFamily: root.fontFamily
       onConfirmed: { clearProc.running = true; opened = false }
       onCanceled: opened = false
+    }
+
+    // A modal over the panel, the way ConfirmDialog is one: the search field
+    // wants the keyboard, and a grid of ten thousand glyphs wants the room.
+    Rectangle {
+      id: iconPicker
+      anchors.fill: parent
+      visible: root.iconPickerOpen
+      color: Color.popups.background
+      radius: Style.cornerRadius
+
+      // Swallows clicks so they cannot reach the prompt list behind it.
+      MouseArea { anchors.fill: parent }
+
+      Column {
+        anchors.fill: parent
+        anchors.margins: Style.spacing.panelPadding
+        spacing: Style.space(8)
+
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Icon"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.iconMatches.length + (root.iconMatches.length === 400 ? "+" : "")
+              + " of " + root.icons.length
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        TextField {
+          id: iconSearch
+          width: parent.width
+          placeholderText: "Search · pencil, mail, code…"
+          foreground: root.foreground
+          onTextEdited: { root.iconQuery = text; root.iconIndex = 0 }
+
+          // The field keeps the keyboard so typing filters, and the arrows
+          // are forwarded to the grid rather than walking the caret.
+          Keys.onUpPressed: root.moveIconCursor(0, -1)
+          Keys.onDownPressed: root.moveIconCursor(0, 1)
+          Keys.onLeftPressed: function(event) {
+            if (iconSearch.text === "") { root.moveIconCursor(-1, 0); event.accepted = true }
+            else event.accepted = false
+          }
+          Keys.onRightPressed: function(event) {
+            if (iconSearch.text === "") { root.moveIconCursor(1, 0); event.accepted = true }
+            else event.accepted = false
+          }
+          Keys.onReturnPressed: function(event) {
+            var hit = root.iconMatches[root.iconIndex]
+            if (hit) root.pickIcon(hit[0])
+            event.accepted = true
+          }
+          Keys.onEscapePressed: function(event) {
+            root.closeIconPicker()
+            event.accepted = true
+          }
+        }
+
+        // The name of whatever the cursor is on, so a glyph nobody recognises
+        // can still be identified before it is chosen.
+        Text {
+          width: parent.width
+          text: root.iconMatches[root.iconIndex]
+            ? root.iconMatches[root.iconIndex][1] : "no match"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        GridView {
+          id: iconGrid
+          width: parent.width
+          height: parent.height - y
+          clip: true
+          cellWidth: Math.floor(width / root.iconColumns)
+          cellHeight: cellWidth
+          model: root.iconMatches
+          currentIndex: root.iconIndex
+          // Keeps the keyboard cursor on screen while it walks the grid.
+          onCurrentIndexChanged: positionViewAtIndex(currentIndex, GridView.Contain)
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          delegate: CursorSurface {
+            id: iconCell
+            required property var modelData
+            required property int index
+
+            width: iconGrid.cellWidth - Style.space(2)
+            height: iconGrid.cellHeight - Style.space(2)
+            current: iconCell.index === root.iconIndex
+            foreground: root.foreground
+
+            Text {
+              anchors.centerIn: parent
+              text: iconCell.modelData ? iconCell.modelData[0] : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.heading
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onPositionChanged: root.iconIndex = iconCell.index
+              onClicked: root.pickIcon(iconCell.modelData[0])
+            }
+          }
+        }
+      }
     }
 
     ConfirmDialog {

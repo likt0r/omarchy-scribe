@@ -186,6 +186,45 @@ than correcting with whatever the settings last said. Decisions worth recording:
   is what keeps the heading and the hint from widening it and pushing the tiles
   off-centre.
 
+### Icons
+
+Each profile may carry an `icon`: a Nerd Font glyph, stored as a plain string
+next to `title`. Nerd Font because that is what every other icon in the shell
+is -- `Style.qml` resolves the fontconfig `monospace` alias at runtime, so a
+glyph is a character and needs no image pipeline.
+
+The picker offers every glyph the font has, about 10,600, because a curated
+palette is a guess about what someone will want to label a prompt with. That
+is only usable with search, and search needs names -- which the font supplies:
+its `post` table names the Nerd Font additions `md-pencil`, `fa-scissors`,
+`oct-repo`. `tools/generate-icons.py` reads them out into `icons.json`; the
+plugin never opens a font file, and fontTools stays a build-time dependency.
+
+Ranked, not merely filtered: "pencil" matches 25 names, and the one actually
+called pencil has to come first. The family prefix is stripped for ranking
+because nobody types `md-`. Results are capped because the grid is rebuilt on
+every keystroke.
+
+`icons.json` is loaded on first open rather than at startup -- it is 300 KB
+that most sessions never look at -- and `model-test.js` checks the shipped file
+parses, has entries, and that every one is a single character with a name: a
+regeneration that produced nothing should fail in the suite, not in the UI.
+
+The field has no fallback, unlike `title`: a prompt without an icon shows its
+title alone, which is what every tile looked like before icons existed.
+
+### Confirmation dialogs need routing
+
+`Ui.ConfirmDialog` carries no `Keys` handling of its own: it exposes
+`handleKey(event)` and expects the panel to call it, the way the first-party
+clipboard and menu panels do. Scribe never did, so "Clear history" could only
+ever be answered with the mouse -- Escape did not dismiss it, Enter did not
+confirm it. The Prompts tab's Delete would have inherited exactly that.
+
+The panel now routes `PanelKeyCatcher`'s semantic signals into whichever dialog
+is open before acting on them itself, which needs no raw event and keeps the
+key handling in one place.
+
 ### The custom tile
 
 One tile past the prompts opens a text box for a one-off instruction. The

@@ -129,7 +129,10 @@ function normalizeProfiles(raw) {
     // never set falls back to the name instead of showing an empty tile. Kept
     // in step with normalize_profiles() in `scribe`.
     var title = String(p.title === undefined ? "" : p.title).trim()
-    out.push({ name: name, title: title === "" ? name : title, system: system })
+    // The icon is optional and has no fallback: a profile without one shows
+    // its title alone, which is what every profile looked like before icons.
+    var icon = String(p.icon === undefined ? "" : p.icon).trim()
+    out.push({ name: name, title: title === "" ? name : title, icon: icon, system: system })
   }
   return out
 }
@@ -208,6 +211,49 @@ function resolveProfile(profiles, wanted) {
     if (list[i].name === wanted) return list[i]
   }
   return list.length > 0 ? list[0] : null
+}
+
+// ---- Icons.
+//
+// Nerd Font glyphs, which is what the shell paints every other icon with --
+// the family is whatever fontconfig resolves `monospace` to, so an icon is an
+// ordinary character. The pickable list is generated into icons.json by
+// tools/generate-icons.py; see filterIcons below.
+
+// A profile with no icon is normal, and the tile just shows its title.
+function hasIcon(profile) {
+  return !!(profile && typeof profile.icon === "string" && profile.icon.length > 0)
+}
+// Search over the generated icons.json: entries are [glyph, name] pairs and
+// the names come from the font itself ("md-pencil", "fa-scissors"), which is
+// what makes ten thousand glyphs findable at all.
+//
+// Ranked rather than merely filtered, because "pencil" matches 25 names and
+// the one actually called pencil has to be first. The cap exists because the
+// grid is rebuilt on every keystroke.
+function filterIcons(icons, query, limit) {
+  var list = icons || []
+  var max = limit > 0 ? limit : 300
+  var q = String(query || "").trim().toLowerCase()
+  if (q === "") return list.slice(0, max)
+
+  var exact = [], starts = [], word = [], rest = []
+  for (var i = 0; i < list.length; i++) {
+    var entry = list[i]
+    if (!entry || entry.length < 2) continue
+    var name = String(entry[1]).toLowerCase()
+    var at = name.indexOf(q)
+    if (at < 0) continue
+    // The family prefix is not what anyone types, so "pencil" has to count as
+    // the start of "md-pencil" too.
+    var bare = name.indexOf("-") >= 0 ? name.slice(name.indexOf("-") + 1) : name
+    if (name === q || bare === q) exact.push(entry)
+    else if (at === 0 || bare.indexOf(q) === 0) starts.push(entry)
+    else if (name.charAt(at - 1) === "_" || name.charAt(at - 1) === "-") word.push(entry)
+    else rest.push(entry)
+    if (exact.length >= max) break
+  }
+  return exact.concat(starts, word, rest).slice(0, max)
 }
 
 // ---- History.
@@ -352,6 +398,8 @@ if (typeof module !== "undefined") {
     profileTitle: profileTitle,
     profileName: profileName,
     gridColumns: gridColumns,
+    hasIcon: hasIcon,
+    filterIcons: filterIcons,
     moveIndex: moveIndex,
     historyEntry: historyEntry,
     hasText: hasText,

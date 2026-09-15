@@ -96,8 +96,8 @@ const rawProfiles = {
 
 check('profiles drop the unusable and the duplicated',
   Model.normalizeProfiles(rawProfiles),
-  [{ name: 'Grammar', title: 'Spelling', system: 'fix it' },
-   { name: 'Formal', title: 'Formal', system: 'be formal' }])
+  [{ name: 'Grammar', title: 'Spelling', icon: '', system: 'fix it' },
+   { name: 'Formal', title: 'Formal', icon: '', system: 'be formal' }])
 check('a missing profiles array is empty, not a throw',
   Model.normalizeProfiles({}), [])
 check('null is empty', Model.normalizeProfiles(null), [])
@@ -116,6 +116,61 @@ check('the named profile wins', Model.resolveProfile(profiles, 'Formal').system,
 check('an unknown name falls back to the first',
   Model.resolveProfile(profiles, 'Deleted').name, 'Grammar')
 check('no profiles resolves to null', Model.resolveProfile([], 'Grammar'), null)
+
+// ---- Icons. Optional, and with no fallback: a prompt without one shows its
+// title alone, the way every tile looked before icons existed.
+check('an icon survives normalizing',
+  Model.normalizeProfiles({ profiles: [{ name: 'a', icon: '\u{F03EB}', system: 's' }] })[0].icon,
+  '\u{F03EB}')
+check('a missing icon is empty, not a fallback',
+  Model.normalizeProfiles({ profiles: [{ name: 'a', system: 's' }] })[0].icon, '')
+check('a blank icon is empty',
+  Model.normalizeProfiles({ profiles: [{ name: 'a', icon: '  ', system: 's' }] })[0].icon, '')
+check('hasIcon is false without one', Model.hasIcon({ name: 'a', icon: '' }), false)
+check('hasIcon is true with one', Model.hasIcon({ name: 'a', icon: '\u{F03EB}' }), true)
+check('hasIcon copes with nothing', Model.hasIcon(null), false)
+// ---- Icon search. The names come from the font, so "pencil" has to beat
+// "pencil_square" and the family prefix must not get in the way.
+const iconFixture = [
+  ['a', 'fa-pencil_square_o'],
+  ['b', 'md-pencil'],
+  ['c', 'oct-repo'],
+  ['d', 'md-broom'],
+  ['e', 'md-file_pencil'],
+  ['f', 'fa-pencil']
+]
+
+check('an exact name wins, prefix or not',
+  Model.filterIcons(iconFixture, 'pencil', 10).map(function (e) { return e[1] })[0],
+  'md-pencil')
+check('a word boundary beats a substring',
+  Model.filterIcons(iconFixture, 'pencil', 10).map(function (e) { return e[1] }),
+  ['md-pencil', 'fa-pencil', 'fa-pencil_square_o', 'md-file_pencil'])
+check('search is case-insensitive',
+  Model.filterIcons(iconFixture, 'BROOM', 10).map(function (e) { return e[1] }), ['md-broom'])
+check('an empty query lists from the top',
+  Model.filterIcons(iconFixture, '', 2).length, 2)
+check('whitespace is not a query',
+  Model.filterIcons(iconFixture, '   ', 3).length, 3)
+check('no match is empty, not everything',
+  Model.filterIcons(iconFixture, 'zzzz', 10), [])
+// The grid is rebuilt on every keystroke, so the cap is load-bearing.
+check('the limit is honoured', Model.filterIcons(iconFixture, 'pencil', 2).length, 2)
+check('a missing list is empty', Model.filterIcons(null, 'x', 10), [])
+check('malformed entries are skipped',
+  Model.filterIcons([['g'], null, ['h', 'md-pencil']], 'pencil', 10).length, 1)
+
+// The shipped icons.json is a generated data file the panel depends on, so a
+// regeneration that produced nothing has to fail here rather than in the UI.
+const shippedIcons = JSON.parse(
+  require('fs').readFileSync(path.join(__dirname, '..', 'icons.json'), 'utf8')).icons
+check('icons.json carries a real list', shippedIcons.length > 5000, true)
+check('every entry is [glyph, name]',
+  shippedIcons.filter(function (e) {
+    return !Array.isArray(e) || e.length !== 2 || Array.from(e[0]).length !== 1 || !e[1]
+  }).length, 0)
+check('a familiar icon is findable',
+  Model.filterIcons(shippedIcons, 'md-pencil', 1).map(function (e) { return e[1] }), ['md-pencil'])
 
 check('a title is looked up by name', Model.profileTitle(profiles, 'Grammar'), 'Spelling')
 check('a profile object is accepted directly',

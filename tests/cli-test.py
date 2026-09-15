@@ -249,8 +249,28 @@ class ScribeTest(unittest.TestCase):
         result = self.run_scribe("profiles", "save", stdin=json.dumps(payload))
         self.assertEqual(result.returncode, EXIT_OK, result.stderr)
         with open(path, encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["profiles"], payload["profiles"])
+            saved = json.load(handle)["profiles"]
+        # Normalized on the way in, so the file holds every field the readers
+        # expect rather than whatever the caller happened to send.
+        self.assertEqual(saved, [{"name": "quick", "title": "Shorten",
+                                  "icon": "", "system": "shorten the <text>"}])
         self.assertEqual(self.run_scribe("profiles").stdout.strip(), "quick")
+
+    def test_profiles_save_round_trips_an_icon(self):
+        payload = {"profiles": [{"name": "quick", "title": "Shorten",
+                                 "icon": "\U000F03EB", "system": "shorten it"}]}
+        result = self.run_scribe("profiles", "save", stdin=json.dumps(payload))
+        self.assertEqual(json.loads(result.stdout)["profiles"][0]["icon"], "\U000F03EB")
+        listed = json.loads(self.run_scribe("profiles", "--json").stdout)
+        self.assertEqual(listed["profiles"][0]["icon"], "\U000F03EB")
+
+    def test_the_shipped_profiles_have_icons(self):
+        """The tiles ship with something on them, not just titles."""
+        self.run_scribe("profiles")
+        listed = json.loads(self.run_scribe("profiles", "--json").stdout)
+        for profile in listed["profiles"]:
+            with self.subTest(profile=profile["name"]):
+                self.assertTrue(profile["icon"], profile)
 
     def test_profiles_save_keeps_the_file_private(self):
         path = os.path.join(self.config, "omarchy", "scribe", "profiles.json")

@@ -130,6 +130,7 @@ BUILTIN_PROFILES = {
     "profiles": [
         {
             "name": "Grammar",
+            "icon": "󰓆",
             "title": "Grammar",
             "system": (
                 "You correct spelling, grammar and punctuation.\n"
@@ -146,6 +147,7 @@ BUILTIN_PROFILES = {
         },
         {
             "name": "Grammar + style",
+            "icon": "󰬴",
             "title": "Grammar + style",
             "system": (
                 "You correct spelling, grammar and punctuation, and tighten "
@@ -162,6 +164,7 @@ BUILTIN_PROFILES = {
         },
         {
             "name": "Formal",
+            "icon": "󰳣",
             "title": "Formal",
             "system": (
                 "You correct spelling, grammar and punctuation, and raise the "
@@ -290,9 +293,12 @@ def normalize_profiles(raw):
         seen.add(name)
         # A profile written before titles existed, or one hand-edited to drop
         # the field, falls back to its name rather than showing an empty tile.
+        # The icon has no fallback on purpose: without one the tile shows its
+        # title alone, which is what every tile looked like before icons.
         out.append({
             "name": name,
             "title": str(item.get("title", "")).strip() or name,
+            "icon": str(item.get("icon", "")).strip(),
             "system": system,
         })
     return out

@@ -67,6 +67,11 @@ corrects, Escape walks away.
 | **right click** | dismiss the picker, or cancel a correction in flight |
 | **`c` in the panel** | open the picker |
 | **`h` / `p` / `s`** | history / prompts / settings tab |
+| **`←` / `→` in the panel** | move between the tabs |
+
+In the Prompts tab the list is keyboard-driven too: `↑` / `↓` select a prompt,
+`n` starts a new one, `i` picks its icon, and `x` deletes it — the same
+question the Delete button asks, answered with `←` `→` and Enter.
 | **`d`** | run the setup check |
 
 The tile the keybind would have used on its own carries a dot, and the picker
@@ -120,6 +125,18 @@ falls back to.
 The **title** is what the tile says, and it is yours to change at any time.
 The **name** underneath it is the identity — it is what the settings and every
 history entry point at — so renaming a title never orphans them.
+
+Each prompt can also carry an **icon**, shown on its tile above the title the
+way the Custom tile shows its pencil. "Choose…" in the Prompts tab (or `i`)
+opens a picker over the panel with **every glyph the font has** — about 10,600
+of them — and a search box. The names come from the font itself, so `pencil`,
+`mail` or `code` finds what you would expect; arrows move, Enter picks, Escape
+backs out. An icon is optional, and "Clear" removes one.
+
+They are Nerd Font glyphs, which is what the shell paints every other icon
+with, so an icon is an ordinary character — no image, no cache, no theme
+lookup. The list lives in `icons.json`, regenerated from the font by
+`tools/generate-icons.py` when the font gains glyphs.
 
 They live in `~/.config/omarchy/scribe/profiles.json`, which is yours: Scribe
 writes it when you press Save in the panel, and once more the first time it
